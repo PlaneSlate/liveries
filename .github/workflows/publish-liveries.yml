@@ -1,0 +1,50 @@
+name: Publish PlaneSlate liveries
+run-name: PlaneSlate liveries ${{ inputs.job_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      snapshot_key:
+        required: true
+        type: string
+      snapshot_sha256:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: planeslate-livery-publisher
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'PlaneSlate/liveries' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Load the exact approved workflow revision
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          git init source
+          git -C source remote add origin https://github.com/PlaneSlate/liveries.git
+          git -C source fetch --depth=1 origin "$SOURCE_SHA"
+          git -C source checkout --detach FETCH_HEAD
+      - name: Install image tools
+        run: |
+          python3 -m venv tools
+          tools/bin/python -m pip install --disable-pip-version-check -r source/publisher/requirements.txt
+      - name: Build, verify and publish all three device packages
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          SNAPSHOT_KEY: ${{ inputs.snapshot_key }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: tools/bin/python source/publisher/publisher.py --publish
