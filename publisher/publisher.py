@@ -23,6 +23,7 @@ from import_livery_artwork import convert
 from build_livery_release import build
 from livery_distribution import prepare_downloads, GitHubPublisher
 from sd_manager import Package
+from livery_delta import add_deltas
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from time import perf_counter
@@ -181,7 +182,7 @@ def fetch_and_verify_original(store, ink, f):
 
     return f
 
-def build_snapshot(s,store,work,conversion_cache=None):
+def build_snapshot(s,store,work,conversion_cache=None,previous=None):
     files=validate_snapshot(s,s['job_id'])
     work.mkdir(parents=True,exist_ok=False)
     bootstrap=work/'bootstrap.zip'; b=s['bootstrap']
@@ -257,6 +258,9 @@ def build_snapshot(s,store,work,conversion_cache=None):
         bundle=draft/catalog['package']['file'];shutil.copyfile(bundle,upload/bundle.name)
     with phase('verify_packages'):
         verify_packages(upload,s,files)
+    if previous is not None:
+        with phase('differential device packages'):
+            add_deltas(upload,previous)
     receipt=dict(schema=1,job_id=s['job_id'],snapshot_sha256=s['_snapshot_sha256'],version=s['version'],sequence=s['sequence'],products=['ink','mini_800','micro_360'],originals=len(files),hardware_validation='pending')
     (upload/'publication.json').write_text(json.dumps(receipt,sort_keys=True),encoding='utf8')
     with phase('SHA256SUMS'):
@@ -298,6 +302,47 @@ def verify_packages(upload,s,originals):
 
 
 class GitHub(GitHubPublisher):
+    def previous_devices(self,output,exclude_version):
+        latest=self.request('GET','/releases/latest')
+        if latest and latest['tag_name']=='liveries-'+exclude_version:
+            releases=self.request('GET','/releases?per_page=100')
+            eligible=[r for r in releases if not r.get('draft') and not r.get('prerelease') and
+                      re.fullmatch(r'liveries-\d+\.\d+\.\d+',r['tag_name']) and
+                      tuple(map(int,r['tag_name'][len('liveries-'):].split('.')))<tuple(map(int,exclude_version.split('.')))]
+            latest=max(eligible,key=lambda r:tuple(map(int,r['tag_name'][len('liveries-'):].split('.'))),default=None)
+        if not latest:return None
+        if latest.get('draft') or latest.get('prerelease') or not re.fullmatch(r'liveries-\d+\.\d+\.\d+',latest['tag_name']):
+            raise ValueError('Invalid differential baseline release')
+        version=latest['tag_name'][len('liveries-'):];output.mkdir(parents=True,exist_ok=False)
+        for product in ('mini_800','micro_360'):
+            name=product+'-'+version+'.psu'
+            asset=next((a for a in latest['assets'] if a['name']==name),None)
+            if not asset:continue
+            if not re.fullmatch(r'sha256:[a-f0-9]{64}',asset.get('digest','')) or not 0<asset['size']<=1024**3:
+                raise ValueError('Invalid previous device asset')
+            url=asset['browser_download_url'];target=output/(product+'.psu')
+            for attempt in range(5):
+                u=urllib.parse.urlsplit(url)
+                allowed=(u.hostname=='github.com' and u.path.startswith('/'+REPO+'/releases/download/')) or u.hostname in ('release-assets.githubusercontent.com','objects.githubusercontent.com')
+                if u.scheme!='https' or u.port not in (None,443) or u.username or u.password or not allowed:raise ValueError('Untrusted baseline URL')
+                c=http.client.HTTPSConnection(u.hostname,timeout=60)
+                try:
+                    c.request('GET',u.path+('?' +u.query if u.query else ''),headers={'User-Agent':'PlaneSlate-Livery-Publisher','Accept-Encoding':'identity'})
+                    r=c.getresponse()
+                    if r.status in (301,302,303,307,308):url=urllib.parse.urljoin(url,r.getheader('Location'));continue
+                    if r.status!=200:raise ValueError('Previous device download failed')
+                    sha=hashlib.sha256();size=0
+                    with target.open('xb') as dest:
+                        while block:=r.read(65536):
+                            size+=len(block)
+                            if size>asset['size']:raise ValueError('Previous device asset too large')
+                            sha.update(block);dest.write(block)
+                    if size!=asset['size'] or 'sha256:'+sha.hexdigest()!=asset['digest']:raise ValueError('Previous device checksum mismatch')
+                    break
+                finally:c.close()
+            else:raise ValueError('Baseline redirect limit')
+        return output
+
     def request(self,method,path,data=None):
         c=http.client.HTTPSConnection('api.github.com',timeout=90)
         try:
@@ -393,11 +438,16 @@ def main():
         store.get(key,snapshot_file,checksum,4*1024**2)
     snapshot=json.loads(snapshot_file.read_text(encoding='utf8'));validate_snapshot(snapshot,job)
     snapshot['_snapshot_sha256']=checksum
-    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache)
+    github=GitHub(os.environ['GITHUB_TOKEN']) if args.publish else None
+    previous=None
+    if github:
+        with phase('verified previous device packages'):
+            previous=github.previous_devices(args.output.with_suffix('.previous'),snapshot['version'])
+    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache,previous=previous)
     if isinstance(store,CachedOriginals):print('Original cache: hits=',store.hits,'misses=',store.misses,flush=True)
     print('All device packages verified:',assets,flush=True)
     if args.publish:
-        publish(assets,snapshot,GitHub(os.environ['GITHUB_TOKEN']))
+        publish(assets,snapshot,github)
 
 
 if __name__=='__main__':main()
