@@ -20,6 +20,20 @@ from sd_manager import Package
 PRODUCTS = {'mini_800': 'large', 'micro_360': 'compact'}
 
 
+def artwork_paths(entries, prefix):
+    """Deterministic 8.3 names; at most 64 images per directory.
+
+    The index keeps the full SHA-256. Names use collision-free ordinals within
+    this immutable generation, including when digests share a prefix.
+    Two directory levels also bound fan-out for the maximum supported library.
+    """
+    hashes = sorted({entry['sha256'] for entry in entries})
+    if len(hashes) > 100000:
+        raise ValueError('Too many unique artwork files')
+    return {sha: prefix + f'{i // 4096:08x}/{i // 64 % 64:08x}/{i % 64:08x}.png'
+            for i, sha in enumerate(hashes)}
+
+
 def digest(path):
     with Path(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -123,10 +137,11 @@ def build(source, output, version, sequence, release_date, repository=None, prev
         prefix = f'library/generations/{version}/'
         for product, layout in PRODUCTS.items():
             selected = sorted((e for e in rows if e['layout'] == layout), key=identity)
+            paths = artwork_paths(selected, prefix)
             index = []
             assets = {}
             for entry in selected:
-                name = prefix + entry['sha256'] + '.png'
+                name = paths[entry['sha256']]
                 assets[name] = entry['path']
                 index.append(dict(entry, path=name))
             index_data = b''.join((json.dumps(e, sort_keys=True, separators=(',', ':'))+'\n').encode() for e in index)
