@@ -181,7 +181,7 @@ def fetch_and_verify_original(store, ink, f):
 
     return f
 
-def build_snapshot(s,store,work):
+def build_snapshot(s,store,work,conversion_cache=None):
     files=validate_snapshot(s,s['job_id'])
     work.mkdir(parents=True,exist_ok=False)
     bootstrap=work/'bootstrap.zip'; b=s['bootstrap']
@@ -228,7 +228,8 @@ def build_snapshot(s,store,work):
         with zipfile.ZipFile(work/'artwork.zip','x',zipfile.ZIP_STORED) as z:
             for name in sorted(pairs): z.write(ink/'liveries'/name,name)
     with phase('conversion'):
-        audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs)
+        audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs,conversion_cache=conversion_cache)
+        print('Conversion cache: hits=',audit['conversion_cache_hits'],'misses=',audit['conversion_cache_misses'],flush=True)
         if audit['unmapped'] or audit['conflicts']: raise ValueError('Incomplete conversion')
     with phase('normalize_zip'):
         normalize_zip(work/'converted/liveries.zip')
@@ -379,6 +380,7 @@ def main():
     parser.add_argument('--local-store',type=Path)
     parser.add_argument('--output',type=Path,default=Path('livery-build'))
     parser.add_argument('--original-cache',type=Path)
+    parser.add_argument('--conversion-cache',type=Path)
     args=parser.parse_args()
     if args.publish and args.local_store: raise ValueError('Local verification cannot publish')
     job=os.environ['JOB_ID'];key=os.environ['SNAPSHOT_KEY'];checksum=os.environ['SNAPSHOT_SHA256']
@@ -391,7 +393,7 @@ def main():
         store.get(key,snapshot_file,checksum,4*1024**2)
     snapshot=json.loads(snapshot_file.read_text(encoding='utf8'));validate_snapshot(snapshot,job)
     snapshot['_snapshot_sha256']=checksum
-    assets=build_snapshot(snapshot,store,args.output)
+    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache)
     if isinstance(store,CachedOriginals):print('Original cache: hits=',store.hits,'misses=',store.misses,flush=True)
     print('All device packages verified:',assets,flush=True)
     if args.publish:

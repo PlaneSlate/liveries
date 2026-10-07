@@ -7,21 +7,60 @@ import re
 import sys
 import zipfile
 import stat
-from PIL import Image
+from PIL import Image, __version__ as PILLOW_VERSION
+import hashlib
 from sd_manager import Package, sha, compact
 
 
-def convert(source, base, output, version, types, airlines, *, file_pairs=None):
+# Bump when cropping, resizing or encoding behavior changes.
+CONVERSION_VERSION = 'rgba-alpha-crop-lanczos-png9-v1'
+
+
+def encoded_image(image, original_hash, layout, size, cache, audit):
+    settings = dict(source=original_hash, layout=layout, size=size,
+                    converter=CONVERSION_VERSION, pillow=PILLOW_VERSION)
+    key = hashlib.sha256(compact(settings).encode()).hexdigest()
+    target = cache / (key + '.png') if cache is not None else None
+    if target is not None and target.is_file():
+        try:
+            if target.stat().st_size > 512*1024:
+                raise ValueError('Oversized cached image')
+            data = target.read_bytes()
+            with Image.open(io.BytesIO(data)) as cached:
+                # Cache is untrusted: compare decoded pixels to the expected resize.
+                # This retains validation while avoiding expensive PNG encoding.
+                if (cached.format == 'PNG' and cached.mode == 'RGBA'
+                        and cached.size == image.size
+                        and cached.tobytes() == image.tobytes()):
+                    audit['conversion_cache_hits'] += 1
+                    return data
+        except (OSError, ValueError, SyntaxError):
+            pass
+    stream = io.BytesIO()
+    image.save(stream, format='PNG', compress_level=9)
+    data = stream.getvalue()
+    audit['conversion_cache_misses'] += 1
+    if target is not None:
+        temporary = target.with_suffix('.tmp')
+        temporary.write_bytes(data)
+        temporary.replace(target)
+    return data
+
+
+def convert(source, base, output, version, types, airlines, *, file_pairs=None, conversion_cache=None):
     if not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version):
         raise ValueError('Invalid version')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    cache = Path(conversion_cache) if conversion_cache is not None else None
+    if cache is not None:
+        cache.mkdir(parents=True, exist_ok=True)
     prefix = f'library/generations/{version}/'
     library = Package(base)
     if library.kind != 'library':
         library.close()
         raise ValueError('Base must be a livery library')
-    audit = dict(source_files=0, mapped_files=0, unmapped=[], conflicts=[], changed_keys=0, new_keys=0)
+    audit = dict(source_files=0, mapped_files=0, unmapped=[], conflicts=[], changed_keys=0, new_keys=0, conversion_cache_hits=0, conversion_cache_misses=0)
     try:
         with zipfile.ZipFile(source) as raw, zipfile.ZipFile(output/'liveries.zip', 'x', zipfile.ZIP_DEFLATED) as result:
             members = raw.infolist()
@@ -56,7 +95,9 @@ def convert(source, base, output, version, types, airlines, *, file_pairs=None):
                     raise ValueError('Invalid authoritative artwork mapping')
                 if not sep or not pairs:
                     audit['unmapped'].append(member.filename);continue
-                with Image.open(io.BytesIO(raw.read(member))) as image:
+                original_data = raw.read(member)
+                original_hash = sha(original_data)
+                with Image.open(io.BytesIO(original_data)) as image:
                     if image.format!='PNG' or image.width*image.height>16_000_000:
                         raise ValueError('Invalid artwork image')
                     original=image.convert('RGBA')
@@ -66,8 +107,8 @@ def convert(source, base, output, version, types, airlines, *, file_pairs=None):
                 prepared=[]
                 for layout,size in [('compact',(300,88)),('large',(640,180))]:
                     image=original.copy();image.thumbnail(size,Image.Resampling.LANCZOS)
-                    stream=io.BytesIO();image.save(stream,format='PNG',compress_level=9)
-                    data=stream.getvalue();digest=sha(data);path=prefix+digest+'.png'
+                    data=encoded_image(image,original_hash,layout,size,cache,audit)
+                    digest=sha(data);path=prefix+digest+'.png'
                     new_assets[path]=data
                     for code,operator in pairs:
                         entry=dict(type=code,airline=operator,layout=layout,path=path,sha256=digest,bytes=len(data),width=image.width,height=image.height)
