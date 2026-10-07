@@ -37,6 +37,12 @@ jobs:
         run: |
           python3 -m venv tools
           tools/bin/python -m pip install --disable-pip-version-check -r source/publisher/requirements.txt
+      - name: Restore untrusted content-addressed originals
+        uses: actions/cache@v4
+        with:
+          path: original-cache
+          key: livery-originals-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: livery-originals-v1-
       - name: Build, verify and publish all three device packages
         env:
           JOB_ID: ${{ inputs.job_id }}
@@ -47,4 +53,4 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: tools/bin/python source/publisher/publisher.py --publish
+        run: tools/bin/python source/publisher/publisher.py --publish --original-cache original-cache
