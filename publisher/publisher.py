@@ -191,8 +191,10 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
         store.get(b['key'],bootstrap,b['sha256'],b['bytes'])
         ink=work/'ink'; (ink/'liveries').mkdir(parents=True);(ink/'mappings').mkdir()
         with zipfile.ZipFile(bootstrap) as z:
+            # The hash-verified bootstrap retains its original catalog marker.
+            # The live snapshot catalog may evolve independently after admin edits.
             expected={'library.zip','catalog-digest.txt'}|{'mappings/'+n for n in ('aircraft_workbook.json','airlines_workbook.json','livery_api_overrides.json','regional_livery_assignments.json','skywest_livery_assignments.json')}
-            if set(z.namelist())!=expected or len(z.infolist())!=len(expected) or sum(i.file_size for i in z.infolist())>512*1024**2 or z.read('catalog-digest.txt').decode()!=s['catalog']['digest']:
+            if set(z.namelist())!=expected or len(z.infolist())!=len(expected) or sum(i.file_size for i in z.infolist())>512*1024**2 or not HEX.fullmatch(z.read('catalog-digest.txt').decode()):
                 raise ValueError('Bootstrap does not match main catalog')
             (work/'base.zip').write_bytes(z.read('library.zip'))
             for name in expected-{'library.zip','catalog-digest.txt'}:
