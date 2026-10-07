@@ -23,7 +23,6 @@ from import_livery_artwork import convert
 from build_livery_release import build
 from livery_distribution import prepare_downloads, GitHubPublisher
 from sd_manager import Package
-from livery_delta import add_deltas
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from time import perf_counter
@@ -258,9 +257,6 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
         bundle=draft/catalog['package']['file'];shutil.copyfile(bundle,upload/bundle.name)
     with phase('verify_packages'):
         verify_packages(upload,s,files)
-    if previous is not None:
-        with phase('differential device packages'):
-            add_deltas(upload,previous)
     receipt=dict(schema=1,job_id=s['job_id'],snapshot_sha256=s['_snapshot_sha256'],version=s['version'],sequence=s['sequence'],products=['ink','mini_800','micro_360'],originals=len(files),hardware_validation='pending')
     (upload/'publication.json').write_text(json.dumps(receipt,sort_keys=True),encoding='utf8')
     with phase('SHA256SUMS'):
@@ -439,11 +435,7 @@ def main():
     snapshot=json.loads(snapshot_file.read_text(encoding='utf8'));validate_snapshot(snapshot,job)
     snapshot['_snapshot_sha256']=checksum
     github=GitHub(os.environ['GITHUB_TOKEN']) if args.publish else None
-    previous=None
-    if github:
-        with phase('verified previous device packages'):
-            previous=github.previous_devices(args.output.with_suffix('.previous'),snapshot['version'])
-    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache,previous=previous)
+    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache)
     if isinstance(store,CachedOriginals):print('Original cache: hits=',store.hits,'misses=',store.misses,flush=True)
     print('All device packages verified:',assets,flush=True)
     if args.publish:
