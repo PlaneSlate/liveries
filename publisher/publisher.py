@@ -165,8 +165,8 @@ def validate_snapshot(s,job):
             raise ValueError('Invalid aircraft/airline mapping')
     return files
 
-def fetch_and_verify_original(store, ink, f):
-    path=ink/'liveries'/f['filename']
+def fetch_and_verify_original(store, originals, f):
+    path=originals/'liveries'/f['filename']
     store.get(f['key'],path,f['sha256'],f['bytes'])
 
     if path.stat().st_size!=f['bytes']:
@@ -189,7 +189,7 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
         raise ValueError('Invalid bootstrap')
     with phase('bootstrap'):
         store.get(b['key'],bootstrap,b['sha256'],b['bytes'])
-        ink=work/'ink'; (ink/'liveries').mkdir(parents=True);(ink/'mappings').mkdir()
+        originals=work/'originals'; (originals/'liveries').mkdir(parents=True)
         with zipfile.ZipFile(bootstrap) as z:
             # The hash-verified bootstrap retains its original catalog marker.
             # The live snapshot catalog may evolve independently after admin edits.
@@ -197,14 +197,12 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
             if set(z.namelist())!=expected or len(z.infolist())!=len(expected) or sum(i.file_size for i in z.infolist())>512*1024**2 or not HEX.fullmatch(z.read('catalog-digest.txt').decode()):
                 raise ValueError('Bootstrap does not match main catalog')
             (work/'base.zip').write_bytes(z.read('library.zip'))
-            for name in expected-{'library.zip','catalog-digest.txt'}:
-                (ink/name).write_bytes(z.read(name))
     choices={(r['type'],r['airline']):r['selected'] for r in s['catalog']['choices']}
     selected={}
     with phase('original download + verification'):
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures=[
-                pool.submit(fetch_and_verify_original,store,ink,f)
+                pool.submit(fetch_and_verify_original,store,originals,f)
                 for f in files
             ]
 
@@ -228,38 +226,23 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
     for key,f in selected.items(): pairs[f['filename']].append(key)
     with phase('artwork.zip'):
         with zipfile.ZipFile(work/'artwork.zip','x',zipfile.ZIP_STORED) as z:
-            for name in sorted(pairs): z.write(ink/'liveries'/name,name)
+            for name in sorted(pairs): z.write(originals/'liveries'/name,name)
     with phase('conversion'):
         audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs,conversion_cache=conversion_cache)
         print('Conversion cache: hits=',audit['conversion_cache_hits'],'misses=',audit['conversion_cache_misses'],flush=True)
         if audit['unmapped'] or audit['conflicts']: raise ValueError('Incomplete conversion')
     with phase('normalize_zip'):
         normalize_zip(work/'converted/liveries.zip')
-    with phase('Ink aliases'):
-        existing={p.name.casefold() for p in (ink/'liveries').iterdir()}
-        for (kind,airline),f in sorted(selected.items()):
-            model=s['catalog']['ink_types'].get(kind)
-            brand='Unknown' if airline=='*' else s['catalog']['ink_airlines'].get(airline)
-            if not model or not brand: continue
-            name=model+'_'+brand+'.png'
-            if not valid_name(name): raise ValueError('Invalid Ink alias')
-            if name.casefold() not in existing:
-                shutil.copyfile(ink/'liveries'/f['filename'],ink/'liveries'/name);existing.add(name.casefold())
-    draft=work/'release'
     with phase('device package build'):
-        catalog=build(work/'converted/liveries.zip',draft,s['version'],s['sequence'],s['created_at'][:10],repository=REPO,ink_assets=ink)
+        draft=work/'release'
+        catalog=build(work/'converted/liveries.zip',draft,s['version'],s['sequence'],s['created_at'][:10],repository=REPO)
         feed=prepare_downloads(draft,channel='stable')
-        ink_download=draft/'downloads'/('ink-'+s['version']+'.zip')
-        normalize_zip(ink_download)
-        ink_entry=next(p for p in feed['products'] if p['id']=='ink')
-        ink_entry.update(bytes=ink_download.stat().st_size,sha256=digest(ink_download))
-        (draft/'downloads/device-updates.json').write_text(json.dumps(feed,indent=2),encoding='utf8')
         upload=work/'assets';upload.mkdir()
         for file in (draft/'downloads').iterdir(): shutil.copyfile(file,upload/file.name)
         bundle=draft/catalog['package']['file'];shutil.copyfile(bundle,upload/bundle.name)
     with phase('verify_packages'):
         verify_packages(upload,s,files)
-    receipt=dict(schema=1,job_id=s['job_id'],snapshot_sha256=s['_snapshot_sha256'],version=s['version'],sequence=s['sequence'],products=['ink','mini_800','micro_360'],originals=len(files),hardware_validation='pending')
+    receipt=dict(schema=1,job_id=s['job_id'],snapshot_sha256=s['_snapshot_sha256'],version=s['version'],sequence=s['sequence'],products=['mini_800','micro_360'],originals=len(files),hardware_validation='pending')
     (upload/'publication.json').write_text(json.dumps(receipt,sort_keys=True),encoding='utf8')
     with phase('SHA256SUMS'):
         (upload/'SHA256SUMS.txt').write_text(''.join(digest(p)+'  '+p.name+'\n' for p in sorted(upload.iterdir())),encoding='ascii')
@@ -268,19 +251,13 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
 
 def verify_packages(upload,s,originals):
     feed=json.loads((upload/'device-updates.json').read_text())
-    if feed['channel']!='stable' or feed['version']!=s['version'] or {p['id'] for p in feed['products']}!={'ink','mini_800','micro_360'}:
+    if feed['channel']!='stable' or feed['version']!=s['version'] or len(feed['products'])!=2 or {p['id'] for p in feed['products']}!={'mini_800','micro_360'}:
         raise ValueError('Incomplete device feed')
     pairs={}
     for p in feed['products']:
         path=upload/p['file']
         if path.parent!=upload or path.stat().st_size!=p['bytes'] or digest(path)!=p['sha256']:
             raise ValueError('Device payload checksum mismatch')
-        if p['id']=='ink':
-            with zipfile.ZipFile(path) as z:
-                if z.testzip(): raise ValueError('Invalid Ink ZIP')
-                for f in originals:
-                    if hashlib.sha256(z.read('assets/liveries/'+f['filename'])).hexdigest()!=f['sha256']: raise ValueError('Missing Ink original')
-            continue
         with path.open('rb') as stream:
             h=json.loads(stream.readline());plan=[]
             if h['product']!=p['id'] or h['version']!=s['version'] or hashlib.sha256(h['manifest'].encode()).hexdigest()!=h['manifest_sha256']: raise ValueError('Invalid device header')
@@ -390,7 +367,7 @@ def publish(upload,s,github):
         if number(latest['tag_name'])>=number(tag):raise ValueError('Version must increase')
         if s['sequence']<=github.inventory_sequence(latest):raise ValueError('Release sequence must increase; refresh the catalog and create a new job')
     if not release:
-        release=github.request('POST','/releases',dict(tag_name=tag,target_commitish=os.environ.get('GITHUB_SHA','main'),name='PlaneSlate Liveries '+s['version'],draft=True,prerelease=False,body=marker+'\n\nPakete für PlaneSlate Ink, Mini und Micro. Vollständige Originale, Katalog und Prüfsummen automatisch geprüft. Geräteprüfung separat.'))
+        release=github.request('POST','/releases',dict(tag_name=tag,target_commitish=os.environ.get('GITHUB_SHA','main'),name='PlaneSlate Liveries '+s['version'],draft=True,prerelease=False,body=marker+'\n\nPakete für PlaneSlate Mini und Micro. Gerätepakete und Prüfsummen automatisch geprüft. Geräteprüfung separat.'))
     files={p.name:p for p in upload.iterdir()}
     remote={a['name']:a for a in release.get('assets',[])}
     if remote.keys()-files.keys():raise ValueError('Unexpected asset in release draft')

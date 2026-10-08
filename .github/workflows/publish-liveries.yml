@@ -49,7 +49,7 @@ jobs:
           path: conversion-cache
           key: livery-conversions-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: livery-conversions-v1-
-      - name: Build, verify and publish all three device packages
+      - name: Build, verify and publish Mini and Micro device packages
         env:
           JOB_ID: ${{ inputs.job_id }}
           SNAPSHOT_KEY: ${{ inputs.snapshot_key }}

@@ -99,7 +99,7 @@ def metadata(path):
     return dict(file=path.name, bytes=path.stat().st_size, sha256=digest(path))
 
 
-def build(source, output, version, sequence, release_date, repository=None, previous=None, ink_assets=None):
+def build(source, output, version, sequence, release_date, repository=None, previous=None):
     source, output = Path(source), Path(output).resolve()
     if not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version):
         raise ValueError('Version must use 1–48 letters, digits, underscores, hyphens or internal dots')
@@ -170,38 +170,7 @@ def build(source, output, version, sequence, release_date, repository=None, prev
                 entries=len(index), unique_images=len(assets), package=asset,
                 inventory=metadata(inventory_path)))
             changelog['products'][product] = changes(inventories.get(product, []), inventory)
-        # One public download; device-specific payloads are implementation details.
-        # Ink artwork retains original filenames/resolution and its mapping snapshot.
-        ink_files = []
-        if ink_assets is not None:
-            ink_assets = Path(ink_assets).resolve()
-            for path in sorted((ink_assets/'liveries').iterdir(), key=lambda p: p.name.casefold()):
-                if path.suffix.lower() != '.png':
-                    continue
-                if path.is_symlink() or not path.is_file() or path.stat().st_size > 20*1024**2:
-                    raise ValueError('Invalid Ink artwork source')
-                with Image.open(path) as image:
-                    if image.format != 'PNG' or image.width*image.height > 16_000_000:
-                        raise ValueError('Invalid Ink PNG')
-                    image.verify()
-                ink_files.append(('ink/assets/liveries/'+path.name, path))
-            if not ink_files or len({name.casefold() for name, _ in ink_files}) != len(ink_files):
-                raise ValueError('Empty or ambiguous Ink library')
-            for filename in ['aircraft_workbook.json', 'airlines_workbook.json',
-                             'livery_api_overrides.json', 'regional_livery_assignments.json',
-                             'skywest_livery_assignments.json']:
-                path = ink_assets/'mappings'/filename
-                if path.is_symlink() or not path.resolve().is_relative_to(ink_assets):
-                    raise ValueError('Invalid Ink mapping source')
-                json.loads(path.read_text(encoding='utf-8'))
-                ink_files.append(('ink/assets/mappings/'+filename, path))
-        ink_inventory = [dict(path=name, bytes=path.stat().st_size, sha256=digest(path)) for name, path in ink_files]
-        if ink_files:
-            write_json(staging/'inventory-ink.json', dict(schema=1, version=version, product='ink', files=ink_inventory))
-        catalog['products'].append(dict(id='ink', availability='draft' if ink_files else 'not_prepared',
-            compatibility=dict(format='planeslate-ink-assets', installer_support='pending'),
-            inventory=metadata(staging/'inventory-ink.json') if ink_files else None,
-            reason='Native PNGs and mappings included; universal installer integration pending.' if ink_files else 'Ink source snapshot not supplied.'))
+        # One public bundle for the two supported devices.
         bundle_path = staging/f'planeslate-liveries-{version}.zip'
         payloads = []
         internal_archives = []
@@ -214,13 +183,8 @@ def build(source, output, version, sequence, release_date, repository=None, prev
                 product['payload'] = dict(path=name, bytes=asset['bytes'], sha256=asset['sha256'])
                 payloads.append(dict(product=product['id'], **product['payload']))
                 internal_archives.append(internal)
-            for (name, path), meta in zip(ink_files, ink_inventory):
-                data = path.read_bytes()
-                if len(data) != meta['bytes'] or hashlib.sha256(data).hexdigest() != meta['sha256']:
-                    raise ValueError('Ink source changed during build')
-                archive_write(bundle, name, data)
             archive_write(bundle, 'bundle.json', encoded(dict(schema=1, format='planeslate-livery-bundle',
-                version=version, embedded=payloads, ink=ink_inventory)))
+                version=version, embedded=payloads)))
         with zipfile.ZipFile(bundle_path) as bundle:
             if bundle.testzip() is not None:
                 raise ValueError('Universal bundle failed ZIP verification')
@@ -232,7 +196,7 @@ def build(source, output, version, sequence, release_date, repository=None, prev
         catalog['package'] = asset
         catalog['format'] = 'planeslate-livery-bundle'
         catalog['installer_support'] = 'pending'
-        catalog['all_devices_included'] = bool(ink_files)
+        catalog['all_devices_included'] = {p['id'] for p in catalog['products']} == set(PRODUCTS)
         write_json(staging/'changes.json', changelog)
         catalog['changes'] = metadata(staging/'changes.json')
         if digest(source) != source_hash:
@@ -255,7 +219,6 @@ if __name__ == '__main__':
     parser.add_argument('--date', required=True)
     parser.add_argument('--repository', help='Optional real GitHub owner/repository; does not upload')
     parser.add_argument('--previous', type=Path, help='Previous complete draft folder for change comparison')
-    parser.add_argument('--ink-assets', type=Path, help='Ink assets snapshot containing liveries/ and mappings/')
     args = parser.parse_args()
-    result = build(args.source, args.output, args.version, args.sequence, args.date, args.repository, args.previous, args.ink_assets)
+    result = build(args.source, args.output, args.version, args.sequence, args.date, args.repository, args.previous)
     print(json.dumps(dict(state=result['state'], version=result['version'], products=[p['id'] for p in result['products'] if p['availability']=='draft'])))

@@ -11,7 +11,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 from sd_manager import Package
 def atomic_json(path, value):
-    path.write_text(json.dumps(value, indent=2), encoding="utf8")
+    temporary=path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value,indent=2,ensure_ascii=False),encoding="utf8")
+    temporary.replace(path)
 
 REPOSITORY = 'PlaneSlate/liveries'
 
@@ -30,8 +32,8 @@ def prepare_downloads(draft, *, channel="test"):
         raise ValueError("Invalid release channel")
     draft = Path(draft)
     catalog = json.loads((draft/'livery-releases.json').read_text())
-    if catalog['state'] != 'draft' or not catalog['all_devices_included']:
-        raise ValueError('Ein vollstaendiger Entwurf fuer Ink, Mini und Micro wird benoetigt.')
+    if catalog['state'] != 'draft' or not catalog['all_devices_included'] or len(catalog['products'])!=2 or {p['id'] for p in catalog['products']}!={'mini_800','micro_360'}:
+        raise ValueError('Ein vollstaendiger Entwurf fuer Mini und Micro wird benoetigt.')
     version = catalog['version']
     target = draft/'downloads'
     if target.exists():
@@ -44,33 +46,25 @@ def prepare_downloads(draft, *, channel="test"):
     feed = dict(schema=1, version=version, sequence=catalog['sequence'], channel=channel, products=[])
     with zipfile.ZipFile(bundle) as archive:
         for product in catalog['products']:
-            if product['id']=='ink':
-                filename = f'ink-{version}.zip'
-                with zipfile.ZipFile(target/filename, 'x', zipfile.ZIP_DEFLATED) as ink:
-                    for member in archive.namelist():
-                        if member.startswith('ink/assets/'):
-                            ink.writestr(member[len('ink/'):], archive.read(member))
-                format_name = 'planeslate-ink-assets'
-            else:
-                filename = f"{product['id']}-{version}.psu"
-                with tempfile.TemporaryDirectory() as temp:
-                    source = Path(temp)/'library.zip'
-                    source.write_bytes(archive.read(product['payload']['path']))
-                    if digest(source)!=product['payload']['sha256']:
-                        raise ValueError('Geraetepaket-Pruefsumme stimmt nicht.')
-                    package = Package(source)
-                    try:
-                        with (target/filename).open('xb') as stream:
-                            stream.write(line(dict(format='planeslate-update-v1', product=product['id'],
-                                version=version, files=len(package.files), plan_sha256=package.plan,
-                                manifest_sha256=hashlib.sha256(package.manifest_raw).hexdigest(),
-                                manifest=package.manifest_raw.decode())))
-                            for name,size,checksum in package.files:
-                                stream.write(line(dict(path=name, bytes=size, sha256=checksum)))
-                                stream.write(package.read(name,64*1024**2))
-                    finally:
-                        package.close()
-                format_name = 'planeslate-update-v1'
+            filename = f"{product['id']}-{version}.psu"
+            with tempfile.TemporaryDirectory() as temp:
+                source = Path(temp)/'library.zip'
+                source.write_bytes(archive.read(product['payload']['path']))
+                if digest(source)!=product['payload']['sha256']:
+                    raise ValueError('Geraetepaket-Pruefsumme stimmt nicht.')
+                package = Package(source)
+                try:
+                    with (target/filename).open('xb') as stream:
+                        stream.write(line(dict(format='planeslate-update-v1', product=product['id'],
+                            version=version, files=len(package.files), plan_sha256=package.plan,
+                            manifest_sha256=hashlib.sha256(package.manifest_raw).hexdigest(),
+                            manifest=package.manifest_raw.decode())))
+                        for name,size,checksum in package.files:
+                            stream.write(line(dict(path=name, bytes=size, sha256=checksum)))
+                            stream.write(package.read(name,64*1024**2))
+                finally:
+                    package.close()
+            format_name = 'planeslate-update-v1'
             file = target/filename
             feed['products'].append(dict(id=product['id'], format=format_name, file=filename,
                 bytes=file.stat().st_size, sha256=digest(file),

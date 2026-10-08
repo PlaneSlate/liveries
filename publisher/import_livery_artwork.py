@@ -142,8 +142,8 @@ if __name__=='__main__':
     for name in ('source','base','output','version'): parser.add_argument('--'+name,required=True)
     args=parser.parse_args()
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-    from planeslate.core.adsb.airlines import AIRLINE_MAP
-    from planeslate.core.adsb.aircraft_types import AIRCRAFT_LIVERY_TYPE_MAP
+    from shared.catalog.airlines import AIRLINE_MAP
+    from shared.catalog.aircraft_types import AIRCRAFT_LIVERY_TYPE_MAP
     types={};airlines={}
     for code,name in AIRCRAFT_LIVERY_TYPE_MAP.items():
         if name and re.fullmatch('[A-Z0-9]{1,4}',code): types.setdefault(name.strip().casefold(),[]).append(code)
