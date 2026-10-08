@@ -108,11 +108,13 @@ class Package:
                 if len(line) > 1024:
                     raise ValueError('Livery-Eintrag ist zu lang.')
                 e = json.loads(line)
+                asset_type=e.get('asset_type','livery')
+                if asset_type not in ('livery','airline_logo') or (asset_type=='airline_logo' and (e['type']!='LOGO' or e.get('review_status')!='cleared')): raise ValueError('Invalid or uncleared asset type')
                 key = (e['type'], e['airline'], e['layout'])
                 if (not re.fullmatch('[A-Z0-9]{1,4}', key[0]) or not re.fullmatch(r'[A-Z]{3}|\*', key[1])
-                        or key[2] not in ('compact', 'large') or key in keys):
+                        or key[2] not in ('compact', 'large') or (asset_type,*key) in keys):
                     raise ValueError('Ungueltiger oder doppelter Livery-Eintrag.')
-                keys.add(key)
+                keys.add((asset_type,*key))
                 dims = (e['width'], e['height'])
                 if any(type(n) is not int or n < 1 or n > 1024 for n in dims):
                     raise ValueError('Ungueltige Bildabmessungen.')

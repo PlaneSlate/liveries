@@ -80,6 +80,7 @@ def prepare_downloads(draft, *, channel="test"):
         if digest(draft/record['file']) != record['sha256']:
             raise ValueError('Inventory checksum mismatch')
         for entry in inventory['entries']:
+            if entry.get('asset_type','livery') != 'livery': continue
             kind, airline = entry['type'], entry['airline']
             if not re.fullmatch(r'[A-Z0-9]{2,4}', kind) or not re.fullmatch(r'[A-Z]{3}|\*', airline):
                 raise ValueError('Invalid inventory pair')

@@ -19,6 +19,7 @@ import zipfile
 from datetime import datetime, timezone
 from collections import defaultdict
 from PIL import Image
+from logo_assets import append_logos
 from import_livery_artwork import convert
 from build_livery_release import build
 from livery_distribution import prepare_downloads, GitHubPublisher
@@ -231,6 +232,8 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
         audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs,conversion_cache=conversion_cache)
         print('Conversion cache: hits=',audit['conversion_cache_hits'],'misses=',audit['conversion_cache_misses'],flush=True)
         if audit['unmapped'] or audit['conflicts']: raise ValueError('Incomplete conversion')
+    with phase('airline logos'):
+        append_logos(work/'converted/liveries.zip',s.get('logos',[]),store,work)
     with phase('normalize_zip'):
         normalize_zip(work/'converted/liveries.zip')
     with phase('device package build'):
@@ -267,7 +270,7 @@ def verify_packages(upload,s,originals):
                 plan.append(f"{entry['path']}\t{entry['bytes']}\t{entry['sha256']}\n")
                 if entry['path'].endswith('index.jsonl'):
                     rows=[json.loads(line) for line in data.splitlines()]
-                    pairs[p['id']]={(r['type'],r['airline']) for r in rows if r['airline']!='*'}
+                    pairs[p['id']]={(r['type'],r['airline']) for r in rows if r['airline']!='*' and r.get('asset_type','livery')=='livery'}
                 elif entry['path'].endswith('.png'):
                     with Image.open(io.BytesIO(data)) as im: im.load()
             if stream.read() or hashlib.sha256(''.join(plan).encode()).hexdigest()!=h['plan_sha256']: raise ValueError('Invalid update plan')
