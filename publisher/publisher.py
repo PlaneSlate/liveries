@@ -182,7 +182,7 @@ def fetch_and_verify_original(store, originals, f):
 
     return f
 
-def build_snapshot(s,store,work,conversion_cache=None,previous=None):
+def build_snapshot(s,store,work,conversion_cache=None,previous=None,logo_cache=None):
     files=validate_snapshot(s,s['job_id'])
     work.mkdir(parents=True,exist_ok=False)
     bootstrap=work/'bootstrap.zip'; b=s['bootstrap']
@@ -233,7 +233,7 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None):
         print('Conversion cache: hits=',audit['conversion_cache_hits'],'misses=',audit['conversion_cache_misses'],flush=True)
         if audit['unmapped'] or audit['conflicts']: raise ValueError('Incomplete conversion')
     with phase('airline logos'):
-        append_logos(work/'converted/liveries.zip',s.get('logos',[]),store,work)
+        append_logos(work/'converted/liveries.zip',s.get('logos',[]),store,work,logo_cache=logo_cache)
     with phase('normalize_zip'):
         normalize_zip(work/'converted/liveries.zip')
     with phase('device package build'):
@@ -404,6 +404,7 @@ def main():
     parser.add_argument('--output',type=Path,default=Path('livery-build'))
     parser.add_argument('--original-cache',type=Path)
     parser.add_argument('--conversion-cache',type=Path)
+    parser.add_argument('--logo-cache',type=Path)
     args=parser.parse_args()
     if args.publish and args.local_store: raise ValueError('Local verification cannot publish')
     job=os.environ['JOB_ID'];key=os.environ['SNAPSHOT_KEY'];checksum=os.environ['SNAPSHOT_SHA256']
@@ -417,7 +418,7 @@ def main():
     snapshot=json.loads(snapshot_file.read_text(encoding='utf8'));validate_snapshot(snapshot,job)
     snapshot['_snapshot_sha256']=checksum
     github=GitHub(os.environ['GITHUB_TOKEN']) if args.publish else None
-    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache)
+    assets=build_snapshot(snapshot,store,args.output,conversion_cache=args.conversion_cache,logo_cache=args.logo_cache)
     if isinstance(store,CachedOriginals):print('Original cache: hits=',store.hits,'misses=',store.misses,flush=True)
     print('All device packages verified:',assets,flush=True)
     if args.publish:
