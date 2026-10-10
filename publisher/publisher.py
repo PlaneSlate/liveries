@@ -164,6 +164,9 @@ def validate_snapshot(s,job):
             raise ValueError('Invalid original')
         if not f['pairs'] or any(not re.fullmatch(r'[A-Z0-9]{2,4}',p['type']) or not re.fullmatch(r'[A-Z]{3}|\*',p['airline']) for p in f['pairs']):
             raise ValueError('Invalid aircraft/airline mapping')
+        for p in f['pairs']:
+            if 'registration' in p and (len(f['pairs'])!=1 or not re.fullmatch(r'[A-Z0-9][A-Z0-9-]{1,15}',p['registration']) or p['airline']!='*' or not f['filename'].endswith('_REG-'+p['registration'].replace('-','')+'.png')):
+                raise ValueError('Invalid registration artwork mapping')
     return files
 
 def fetch_and_verify_original(store, originals, f):
@@ -215,7 +218,7 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None,logo_cache=N
     selected={}
     for f in files:
         for p in f['pairs']:
-            key=(p['type'],p['airline'])
+            key=(p['type'],p['airline'])+((f['filename'],) if 'registration' in p else ())
             if key in choices and f['filename']!=choices[key]:
                 continue
             old=selected.get(key)
@@ -224,12 +227,13 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None,logo_cache=N
             selected[key]=f
 
     pairs=defaultdict(list)
-    for key,f in selected.items(): pairs[f['filename']].append(key)
+    for key,f in selected.items(): pairs[f['filename']].append(key[:2])
+    registration_files={f['filename'] for f in files if any('registration' in p for p in f['pairs'])}
     with phase('artwork.zip'):
         with zipfile.ZipFile(work/'artwork.zip','x',zipfile.ZIP_STORED) as z:
             for name in sorted(pairs): z.write(originals/'liveries'/name,name)
     with phase('conversion'):
-        audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs,conversion_cache=conversion_cache)
+        audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs,conversion_cache=conversion_cache,registration_files=registration_files)
         print('Conversion cache: hits=',audit['conversion_cache_hits'],'misses=',audit['conversion_cache_misses'],flush=True)
         if audit['unmapped'] or audit['conflicts']: raise ValueError('Incomplete conversion')
     with phase('airline logos'):

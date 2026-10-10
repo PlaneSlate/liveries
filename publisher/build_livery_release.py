@@ -55,7 +55,7 @@ def archive_write(archive, name, data):
 
 
 def identity(entry):
-    return (entry.get('asset_type','livery'), entry['type'], entry['airline'])
+    return (entry.get('asset_type','livery'), entry['type'], entry['airline'], entry.get('source_filename','') if entry.get('asset_type')=='registration_livery' else '')
 
 
 def changes(before, after):
@@ -65,7 +65,7 @@ def changes(before, after):
     for label, keys in [('added', new.keys() - old.keys()),
                         ('updated', {k for k in old.keys() & new.keys() if old[k] != new[k]}),
                         ('removed', old.keys() - new.keys())]:
-        result[label] = [dict(type=k[1], airline=k[2], **({'asset_type':k[0]} if k[0]!='livery' else {})) for k in sorted(keys)]
+        result[label] = [dict(type=k[1], airline=k[2], **({'asset_type':k[0]} if k[0]!='livery' else {}), **({'source_filename':k[3]} if k[3] else {})) for k in sorted(keys)]
     return result
 
 
@@ -157,7 +157,7 @@ def build(source, output, version, sequence, release_date, repository=None, prev
             verified = Package(archive_path)
             verified.close()
             inventory_path = staging / f'inventory-{product}.json'
-            inventory = [dict(type=e['type'], airline=e['airline'], sha256=e['sha256'], **({'asset_type':e['asset_type']} if 'asset_type' in e else {})) for e in index]
+            inventory = [dict(type=e['type'], airline=e['airline'], sha256=e['sha256'], **({'asset_type':e['asset_type']} if 'asset_type' in e else {}), **({'source_filename':e['source_filename']} if e.get('asset_type')=='registration_livery' else {})) for e in index]
             write_json(inventory_path, dict(schema=1, version=version, product=product, entries=inventory))
             asset = metadata(archive_path)
             # Planned URLs are deliberately separate from available downloads.

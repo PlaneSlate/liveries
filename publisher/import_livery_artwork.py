@@ -47,9 +47,10 @@ def encoded_image(image, original_hash, layout, size, cache, audit):
     return data
 
 
-def convert(source, base, output, version, types, airlines, *, file_pairs=None, conversion_cache=None):
+def convert(source, base, output, version, types, airlines, *, file_pairs=None, conversion_cache=None, registration_files=None):
     if not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version):
         raise ValueError('Invalid version')
+    registration_files=set(registration_files or [])
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     cache = Path(conversion_cache) if conversion_cache is not None else None
@@ -81,7 +82,8 @@ def convert(source, base, output, version, types, airlines, *, file_pairs=None, 
                 entry=json.loads(line)
                 assets[prefix+entry['sha256']+'.png'] = entry['path']
                 entry['path']=prefix+entry['sha256']+'.png'
-                index[(entry['type'],entry['airline'],entry['layout'])]=entry
+                kind=entry.get('asset_type','livery')
+                index[(kind,entry['type'],entry['airline'],entry['layout'],entry.get('source_filename','') if kind=='registration_livery' else '')]=entry
             new_assets={}; supplied={}
             for member in members:
                 audit['source_files']+=1
@@ -111,8 +113,10 @@ def convert(source, base, output, version, types, airlines, *, file_pairs=None, 
                     digest=sha(data);path=prefix+digest+'.png'
                     new_assets[path]=data
                     for code,operator in pairs:
-                        entry=dict(type=code,airline=operator,layout=layout,path=path,sha256=digest,bytes=len(data),width=image.width,height=image.height)
-                        key=(code,operator,layout)
+                        entry=dict(type=code,airline=operator,layout=layout,path=path,sha256=digest,bytes=len(data),width=image.width,height=image.height,source_filename=member.filename)
+                        registration_asset=member.filename in registration_files
+                        if registration_asset:entry['asset_type']='registration_livery'
+                        key=(entry.get('asset_type','livery'),code,operator,layout,member.filename if registration_asset else '')
                         if key in supplied and supplied[key]!=digest:
                             raise ValueError(f'Conflicting artwork for {key}')
                         supplied[key]=digest;prepared.append((key,entry))

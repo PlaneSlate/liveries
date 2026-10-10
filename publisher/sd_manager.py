@@ -56,9 +56,9 @@ class Package:
                 raise ValueError('Doppelte, verschluesselte oder zu grosse Datei.')
             folded.add(name.lower())
             self.members[name] = entry
-        roots = [k for k in ('library', 'maps') if f'{k}/manifest.json' in self.members]
+        roots = [k for k in ('library', 'maps', 'catalog') if f'{k}/manifest.json' in self.members]
         if len(roots) != 1:
-            raise ValueError('Bitte genau ein Livery- oder Kartenpaket auswaehlen.')
+            raise ValueError('Bitte genau ein Livery-, Karten- oder Katalogpaket auswaehlen.')
         self.kind = roots[0]
         self.manifest_raw = self.read(f'{self.kind}/manifest.json', 4096)
         self.manifest = json.loads(self.manifest_raw)
@@ -108,17 +108,28 @@ class Package:
                 if len(line) > 1024:
                     raise ValueError('Livery-Eintrag ist zu lang.')
                 e = json.loads(line)
+                original=e.get('source_filename')
+                if original is not None and (not isinstance(original,str) or len(original)>240 or original.startswith('.') or any(c in original for c in '/\\:') or not original.endswith('.png')):
+                    raise ValueError('Invalid original artwork filename')
                 asset_type=e.get('asset_type','livery')
-                if asset_type not in ('livery','airline_logo') or (asset_type=='airline_logo' and (e['type']!='LOGO' or e.get('review_status')!='cleared')): raise ValueError('Invalid or uncleared asset type')
+                if asset_type not in ('livery','airline_logo','registration_livery') or (asset_type=='airline_logo' and (e['type']!='LOGO' or e.get('review_status')!='cleared')): raise ValueError('Invalid or uncleared asset type')
+                if asset_type=='registration_livery' and (not original or e['airline']!='*'): raise ValueError('Invalid registration artwork identity')
                 key = (e['type'], e['airline'], e['layout'])
+                identity=(asset_type,*key,original if asset_type=='registration_livery' else '')
                 if (not re.fullmatch('[A-Z0-9]{1,4}', key[0]) or not re.fullmatch(r'[A-Z]{3}|\*', key[1])
-                        or key[2] not in ('compact', 'large') or (asset_type,*key) in keys):
+                        or key[2] not in ('compact', 'large') or identity in keys):
                     raise ValueError('Ungueltiger oder doppelter Livery-Eintrag.')
-                keys.add((asset_type,*key))
+                keys.add(identity)
                 dims = (e['width'], e['height'])
                 if any(type(n) is not int or n < 1 or n > 1024 for n in dims):
                     raise ValueError('Ungueltige Bildabmessungen.')
                 asset(e['path'], e, dims)
+        elif self.kind == 'catalog':
+            # Share the package schema with the dependency-free release builder.
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
+            from catalog_package import validate_package
+            required.update(validate_package(self.manifest, self.read))
         else:
             m = self.manifest
             if (type(m.get('min_zoom')) is not int or type(m.get('max_zoom')) is not int
