@@ -63,7 +63,8 @@ def append_logos(archive_path,logos,store,work,logo_cache=None):
     rows=[json.loads(line) for line in contents[index].splitlines()]
     has_logos=any(r.get('asset_type')=='airline_logo' for r in rows)
     if not logos and not has_logos:return
-    rows=[r for r in rows if r.get('asset_type','livery')=='livery']
+    # Replace logo rows only; explicit registration artwork shares this index.
+    rows=[r for r in rows if r.get('asset_type','livery')!='airline_logo']
     prefix='library/generations/'+manifest['version']+'/'
     seen=set();assets={};entries=[]
     # Validate all mappings before submitting any downloads. One job per full SHA.
