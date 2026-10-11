@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import urllib.parse
+import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -165,6 +166,13 @@ def validate_snapshot(s,job):
         if not f['pairs'] or any(not re.fullmatch(r'[A-Z0-9]{2,4}',p['type']) or not re.fullmatch(r'[A-Z]{3}|\*',p['airline']) for p in f['pairs']):
             raise ValueError('Invalid aircraft/airline mapping')
         for p in f['pairs']:
+            if 'operator' in p:
+                operators=s['catalog'].get('named_operators',{})
+                brand=unicodedata.normalize('NFKD',f['filename'].split('_',1)[1][:-4])
+                brand=''.join(c for c in brand if not unicodedata.combining(c)).lower().replace('&',' and ')
+                ids=operators.get(re.sub(r'[^a-z0-9]','',brand),[])
+                if p['airline']!='*' or 'registration' in p or not re.fullmatch(r'named:[a-zA-Z0-9_-]+',p['operator']) or ids!=[p['operator']]:
+                    raise ValueError('Invalid named operator artwork mapping')
             if 'registration' in p and (len(f['pairs'])!=1 or not re.fullmatch(r'[A-Z0-9][A-Z0-9-]{1,15}',p['registration']) or p['airline']!='*' or not f['filename'].endswith('_REG-'+p['registration'].replace('-','')+'.png')):
                 raise ValueError('Invalid registration artwork mapping')
     return files
@@ -218,7 +226,7 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None,logo_cache=N
     selected={}
     for f in files:
         for p in f['pairs']:
-            key=(p['type'],p['airline'])+((f['filename'],) if 'registration' in p else ())
+            key=(p['type'],p['airline'])+((f['filename'],) if 'registration' in p or 'operator' in p else ())
             if key in choices and f['filename']!=choices[key]:
                 continue
             old=selected.get(key)
@@ -228,7 +236,7 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None,logo_cache=N
 
     pairs=defaultdict(list)
     for key,f in selected.items(): pairs[f['filename']].append(key[:2])
-    registration_files={f['filename'] for f in files if any('registration' in p for p in f['pairs'])}
+    registration_files={f['filename'] for f in files if any('registration' in p or 'operator' in p for p in f['pairs'])}
     with phase('artwork.zip'):
         with zipfile.ZipFile(work/'artwork.zip','x',zipfile.ZIP_STORED) as z:
             for name in sorted(pairs): z.write(originals/'liveries'/name,name)
