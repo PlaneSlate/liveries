@@ -1,0 +1,68 @@
+name: Publish PlaneSlate common content
+run-name: PlaneSlate content ${{ inputs.job_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      snapshot_key:
+        required: true
+        type: string
+      snapshot_sha256:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: planeslate-livery-publisher
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'PlaneSlate/liveries' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Load the exact approved workflow revision
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          git init source
+          git -C source remote add origin https://github.com/PlaneSlate/liveries.git
+          git -C source fetch --depth=1 origin "$SOURCE_SHA"
+          git -C source checkout --detach FETCH_HEAD
+      - name: Install image tools
+        run: |
+          python3 -m venv tools
+          tools/bin/python -m pip install --disable-pip-version-check -r source/publisher/requirements.txt
+      - name: Restore untrusted content-addressed originals
+        uses: actions/cache@v4
+        with:
+          path: original-cache
+          key: livery-originals-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: livery-originals-v1-
+      - name: Restore validated converted images
+        uses: actions/cache@v4
+        with:
+          path: conversion-cache
+          key: livery-conversions-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: livery-conversions-v1-
+      - name: Restore untrusted content-addressed logo variants
+        uses: actions/cache@v4
+        with:
+          path: logo-cache
+          key: livery-logos-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: livery-logos-v1-
+      - name: Build, verify and publish common Mini and Micro content
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          SNAPSHOT_KEY: ${{ inputs.snapshot_key }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: tools/bin/python source/publisher/content_publisher.py --publish --original-cache original-cache --conversion-cache conversion-cache --logo-cache logo-cache

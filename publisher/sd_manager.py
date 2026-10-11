@@ -10,6 +10,7 @@ import stat
 import threading
 import time
 import zipfile
+import tempfile
 from PIL import Image
 
 
@@ -167,6 +168,60 @@ class Package:
         return self.archive.read(entry)  # ZIP CRC is checked by Python as well.
 
 
+class ContentPackage:
+    """Validate both existing component packs before a shared offline USB install."""
+    def __init__(self,path,progress=lambda message:None):
+        import sys
+        sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))
+        from content_release import extract_component
+        from content_package import check_references
+        self.path=Path(path);self.kind='content';self.total=self.path.stat().st_size
+        self.temporary=tempfile.TemporaryDirectory();self.files=[]
+        try:
+            if not 1<=self.total<=1024**3:raise ValueError('Invalid content size')
+            with self.path.open('rb') as source:
+                raw=source.readline(2050);header=json.loads(raw)
+                self.product=header.get('product');self.version=header.get('version');self.sequence=header.get('sequence')
+                if (len(raw)>2049 or not raw.endswith(b'\n') or header.get('format')!='planeslate-content-v1'
+                        or self.product not in ('micro_360','mini_800') or not isinstance(self.version,str)
+                        or len(self.version)>40 or not re.fullmatch(r'\d+\.\d+\.\d+',self.version)
+                        or type(self.sequence) is not int or not 1<=self.sequence<=0xffffffff
+                        or header.get('requires')!={'content_reader':1}
+                        or not isinstance(header.get('components'),list) or len(header['components'])!=2):
+                    raise ValueError('Invalid shared content header')
+                digest=hashlib.sha256(raw);packages=[]
+                for kind,part in zip(('library','catalog'),header['components']):
+                    if (not isinstance(part,dict) or part.get('kind')!=kind or type(part.get('bytes')) is not int
+                            or not 1<=part['bytes']<=self.total or not isinstance(part.get('sha256'),str)
+                            or not re.fullmatch('[a-f0-9]{64}',part['sha256'])):raise ValueError('Invalid content component')
+                    progress('Gemeinsames Paket pruefen: '+kind)
+                    component=Path(self.temporary.name)/(kind+'.psu');component_hash=hashlib.sha256()
+                    with component.open('xb') as target:
+                        left=part['bytes']
+                        while left:
+                            block=source.read(min(left,65536))
+                            if not block:raise ValueError('Incomplete shared content')
+                            target.write(block);digest.update(block);component_hash.update(block);left-=len(block)
+                    if component_hash.hexdigest()!=part['sha256']:raise ValueError('Content component checksum mismatch')
+                    archive=Path(self.temporary.name)/(kind+'.zip');extract_component(component,archive,kind,self.product)
+                    packages.append(archive)
+                if source.read(1):raise ValueError('Unexpected trailing content')
+                self.checksum=digest.hexdigest()
+            library,catalog=Package(packages[0]),None
+            try:
+                catalog=Package(packages[1]);check_references(library,catalog,self.product)
+            finally:
+                library.close()
+                if catalog:catalog.close()
+        except BaseException:
+            self.close();raise
+    def close(self):self.temporary.cleanup()
+
+
+def open_package(path,progress=lambda message:None):
+    return ContentPackage(path,progress) if Path(path).suffix.lower()=='.psu' else Package(path,progress)
+
+
 class Client:
     def __init__(self, port):
         import serial
@@ -212,6 +267,24 @@ def upload(client, package, progress=lambda done, total: None, cancelled=lambda:
     info = client.call('info')
     if info.get('protocol') != 1 or not info.get('sd'):
         raise RuntimeError('Keine verwendbare SD-Karte im Board.')
+    if package.kind=='content':
+        if info.get('content_protocol')!=1 or info.get('product')!=package.product:
+            raise RuntimeError('Firmware oder Produkt passt nicht zum gemeinsamen Paket.')
+        client.call('content-start',bytes=package.total,sha256=package.checksum)
+        try:
+            with package.path.open('rb') as source:
+                offset=0
+                while data:=source.read(4096):
+                    if cancelled():raise InterruptedError('Abgebrochen; bisherige Inhalte bleiben aktiv.')
+                    reply=client.call('content-chunk',offset=offset,hex=data.hex());offset+=len(data)
+                    if reply.get('offset')!=offset:raise RuntimeError('Unerwartete USB-Bestaetigung.')
+                    progress(offset,package.total)
+            if cancelled():raise InterruptedError('Abgebrochen; bisherige Inhalte bleiben aktiv.')
+            return client.call('content-finish')
+        except BaseException:
+            try:client.call('abort')
+            except Exception:pass
+            raise
     client.call('start', kind=package.kind, version=package.version, files=len(package.files),
                 plan_sha256=package.plan, manifest_sha256=sha(package.manifest_raw))
     done = 0
@@ -255,7 +328,7 @@ def gui():
     root.minsize(600, 390)
     frame = ttk.Frame(root, padding=24)
     frame.pack(fill='both', expand=True)
-    ttk.Label(frame, text='Liveries und Karten per USB', font=('Segoe UI', 18)).pack(anchor='w')
+    ttk.Label(frame, text='PlaneSlate-Inhalte per USB', font=('Segoe UI', 18)).pack(anchor='w')
     ttk.Label(frame, text='SD-Karte im Display lassen. Board per USB anschliessen.').pack(anchor='w', pady=(8, 16))
     row = ttk.Frame(frame)
     row.pack(fill='x')
@@ -271,10 +344,10 @@ def gui():
     refresh_button.pack(side='left', padx=8)
     selected = tk.StringVar()
     def choose():
-        name = filedialog.askopenfilename(title='PlaneSlate-Paket auswaehlen', filetypes=[('PlaneSlate-Paket', '*.zip')])
+        name = filedialog.askopenfilename(title='PlaneSlate-Paket auswaehlen', filetypes=[('PlaneSlate-Paket', '*.zip *.psu')])
         if name:
             selected.set(name)
-    choose_button = ttk.Button(frame, text='Livery- oder Kartenpaket auswaehlen …', command=choose)
+    choose_button = ttk.Button(frame, text='Gemeinsames Inhalts- oder Kartenpaket auswaehlen …', command=choose)
     choose_button.pack(anchor='w', pady=(16, 4))
     ttk.Label(frame, textvariable=selected, wraplength=600).pack(anchor='w')
     status = tk.StringVar(value='Bereit. Es werden keine Dateien automatisch heruntergeladen.')
@@ -305,12 +378,13 @@ def gui():
             package = client = None
             try:
                 if action == 'upload':
-                    package = Package(chosen_path, lambda s: messages.put(('status', s)))
+                    package = open_package(chosen_path, lambda s: messages.put(('status', s)))
                     if cancel.is_set():
                         raise InterruptedError('Abgebrochen.')
                 client = Client(chosen_port)
                 if package:
-                    messages.put(('status', f'{package.version}: {len(package.files)} Dateien uebertragen …'))
+                    summary=(f'{package.total/1024/1024:.1f} MB gemeinsam uebertragen' if package.kind=='content' else f'{len(package.files)} Dateien uebertragen')
+                    messages.put(('status', f'{package.version}: {summary} …'))
                     upload(client, package, lambda d, t: messages.put(('progress', 100*d/max(t, 1))), cancel.is_set)
                     messages.put(('done', f'Fertig: {package.version} ist installiert. USB kann getrennt werden.'))
                 else:
@@ -365,14 +439,14 @@ if __name__ == '__main__':
     parser.add_argument('--validate', type=Path)
     args = parser.parse_args()
     if args.validate:
-        package = Package(args.validate)
+        package = open_package(args.validate)
         print(compact(dict(kind=package.kind, version=package.version, files=len(package.files), bytes=package.total)))
         package.close()
     elif args.port:
         client = Client(args.port)
         try:
             if args.package:
-                package = Package(args.package)
+                package = open_package(args.package)
                 try:
                     print(compact(upload(client, package)))
                 finally:
