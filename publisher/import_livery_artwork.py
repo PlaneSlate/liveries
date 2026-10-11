@@ -114,7 +114,9 @@ def convert(source, base, output, version, types, airlines, *, file_pairs=None, 
                     new_assets[path]=data
                     for code,operator in pairs:
                         entry=dict(type=code,airline=operator,layout=layout,path=path,sha256=digest,bytes=len(data),width=image.width,height=image.height,source_filename=member.filename)
-                        registration_asset=member.filename in registration_files
+                        # One PNG may serve an official airline and a named operator.
+                        # Only the filename-based '*' mapping is registration artwork.
+                        registration_asset=member.filename in registration_files and operator=='*'
                         if registration_asset:entry['asset_type']='registration_livery'
                         key=(entry.get('asset_type','livery'),code,operator,layout,member.filename if registration_asset else '')
                         if key in supplied and supplied[key]!=digest:
