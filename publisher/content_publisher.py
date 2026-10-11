@@ -164,6 +164,25 @@ def verify_captured(output,snapshot,baselines=()):
     return receipt
 
 
+def image_alias_choices(snapshot):
+    """Resolve spelling aliases only when the captured catalog has one exact name."""
+    from copy import deepcopy
+    from collections import defaultdict
+    images=deepcopy(snapshot)
+    catalog=images['catalog'];groups=defaultdict(list)
+    explicit={(c['type'],c['airline']) for c in catalog.get('choices',[])}
+    for file in images['files']:
+        for pair in file['pairs']:
+            if 'registration' not in pair and 'operator' not in pair:
+                groups[(pair['type'],pair['airline'])].append(file['filename'])
+    normalize=lambda name:name.replace('_',' ').casefold()
+    for (type_code,airline),names in groups.items():
+        if len(names)<2 or (type_code,airline) in explicit:continue
+        canonical=catalog['ink_types'].get(type_code,'')+'_'+catalog['ink_airlines'].get(airline,'')+'.png'
+        if names.count(canonical)==1 and all(normalize(name)==normalize(canonical) for name in names):
+            catalog.setdefault('choices',[]).append({'type':type_code,'airline':airline,'selected':canonical})
+    return images
+
 def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,logo_cache=None):
     output=Path(output)
     # Completed retries verify the same artifacts. Partial directories fail
@@ -172,7 +191,7 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
         return verify_captured(output/'content',snapshot,baselines)
     output.mkdir(parents=True)
     images=output/'images'
-    build_snapshot(snapshot,store,images,conversion_cache=conversion_cache,logo_cache=logo_cache)
+    build_snapshot(image_alias_choices(snapshot),store,images,conversion_cache=conversion_cache,logo_cache=logo_cache)
     draft=images/'release'
     image_receipt=json.loads((draft/'livery-releases.json').read_bytes())
     if (image_receipt['version']!=snapshot['version'] or image_receipt['sequence']!=snapshot['sequence']
