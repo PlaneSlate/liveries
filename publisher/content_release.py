@@ -73,7 +73,10 @@ def image_inventory(libraries):
                 else:
                     name = row.get('source_filename')
                     if not name:
-                        raise ValueError('Content preview requires original image filenames')
+                        # Old bootstrap artwork predates source-filename metadata.
+                        # Its validated mapping is a stable opaque inventory identity;
+                        # it must still count, without inventing an original filename.
+                        name='@legacy-'+sha(encoded([row['type'],row['airline'],row.get('asset_type','livery')]))+'.png'
                     if product in images[name] and images[name][product] != variant:
                         raise ValueError('Conflicting image filename variants')
                     images[name][product] = variant
