@@ -41,6 +41,9 @@ def check_references(library, catalog, product):
     """
     layout = 'compact' if product == 'micro_360' else 'large'
     index = library.manifest['index']
+    rows = [json.loads(raw) for raw in library.read(index['path'], 64 * 1024**2).splitlines()]
+    if any(row.get('asset_type') == 'airline_logo' for row in rows):
+        raise ValueError('Airline logos are not supported in Mini/Micro content packs')
     names = {(row['type'], row.get('source_filename')) for raw in
              library.read(index['path'], 64 * 1024**2).splitlines()
              if (row := json.loads(raw))['layout'] == layout

@@ -244,8 +244,9 @@ def build_snapshot(s,store,work,conversion_cache=None,previous=None,logo_cache=N
         audit=convert(work/'artwork.zip',work/'base.zip',work/'converted',s['version'],{}, {},file_pairs=pairs,conversion_cache=conversion_cache,registration_files=registration_files)
         print('Conversion cache: hits=',audit['conversion_cache_hits'],'misses=',audit['conversion_cache_misses'],flush=True)
         if audit['unmapped'] or audit['conflicts']: raise ValueError('Incomplete conversion')
-    with phase('airline logos'):
-        append_logos(work/'converted/liveries.zip',s.get('logos',[]),store,work,logo_cache=logo_cache)
+    # Logos stay in the Admin/master store for future hardware. Removing old
+    # bootstrap logo rows requires no downloads or conversion work.
+    append_logos(work/'converted/liveries.zip',[],store,work,logo_cache=logo_cache)
     with phase('normalize_zip'):
         normalize_zip(work/'converted/liveries.zip')
     with phase('device package build'):

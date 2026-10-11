@@ -120,6 +120,8 @@ def build(source, output, version, sequence, release_date, repository=None, prev
         if package.kind != 'library':
             raise ValueError('A library package is required, not a map package')
         rows = [json.loads(line) for line in package.read(package.manifest['index']['path'], 64*1024**2).splitlines()]
+        # Retain master/Admin logos, but never distribute them to these small displays.
+        rows = [row for row in rows if row.get('asset_type', 'livery') != 'airline_logo']
         for product, layout in PRODUCTS.items():
             if not any(row['layout'] == layout for row in rows):
                 raise ValueError(f'Missing artwork layout for {product}')

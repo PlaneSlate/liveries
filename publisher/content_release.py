@@ -66,10 +66,7 @@ def image_inventory(libraries):
                     continue
                 variant = {key:row[key] for key in ('sha256', 'bytes', 'width', 'height')}
                 if row.get('asset_type', 'livery') == 'airline_logo':
-                    identity = row['airline']
-                    if product in logos[identity] and logos[identity][product] != variant:
-                        raise ValueError('Conflicting logo variants')
-                    logos[identity][product] = variant
+                    raise ValueError('Airline logos are not supported in Mini/Micro content packs')
                 else:
                     name = row.get('source_filename')
                     if not name:
