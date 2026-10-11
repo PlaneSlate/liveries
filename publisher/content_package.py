@@ -50,7 +50,7 @@ def check_references(library, catalog, product):
         registration = json.loads(raw)
         override = registration.get('livery')
         if override and (override['type'], override['filename']) not in names:
-            raise ValueError('Registration livery is absent from the shared product pack')
+            raise ValueError('Registration livery is absent from the shared product pack: '+product+' / '+registration['registration']+' / '+override['type']+' / '+override['filename'])
 
 
 def build(library_path, catalog_path, output, product, version, sequence):
