@@ -16,6 +16,9 @@ TABLES = ('aircraft', 'airlines', 'aliases', 'registrations')
 AIRCRAFT_FIELDS = ('icao', 'iata_type', 'manufacturer', 'model', 'aircraft_type',
                    'engine_type', 'engine_count', 'wake_turbulence_category',
                    'planeslate_name', 'livery_name')
+# GENERATED RADAR CATEGORIES
+RADAR_SYMBOLS = ('airliner_standard', 'airliner_heavy', 'small_aircraft', 'business_jet', 'helicopter', 'glider', 'balloon', 'military')
+# END RADAR CATEGORIES
 CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'government')
 
 
@@ -59,7 +62,9 @@ def validate(snapshot):
         result[table] = {}
         for row in source:
             if table == 'aircraft':
-                exact(row, AIRCRAFT_FIELDS)
+                exact(row, AIRCRAFT_FIELDS + (('radar_symbol',) if 'radar_symbol' in row else ()))
+                if row.get('radar_symbol', '') not in ('', *RADAR_SYMBOLS):
+                    raise ValueError('Invalid radar symbol')
                 for value in row.values():
                     text(value)
                 key = row['icao']
