@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import zipfile
 
@@ -129,7 +130,7 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
             url='https://github.com/'+repository+'/releases/download/content-'+version+'/'+path.name))
     (output/'content-inventory.json').write_bytes(encoded(inventory)+b'\n')
     feed = dict(schema=1, component='content', channel='stable', version=version, sequence=sequence,
-        requires=dict(content_reader=1, catalog_reader=1), products=products,
+        requires=dict(content_reader=1, catalog_reader=json.loads(files['catalog/manifest.json'])['requires']['catalog_reader']), products=products,
         changes=changes, first_install=first_install)
     raw = encoded(feed)+b'\n'
     if len(raw) > 16384:
@@ -141,6 +142,15 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
         catalog=metadata(catalog), inventory=metadata(output/'content-inventory.json'),
         feed=metadata(output/'content-updates.json'), products=products,
         release_tag='content-'+version, repository=repository)
+    if any(row.get('radar_shape') for row in snapshot['aircraft']):
+        source=Path(__file__).with_name('aircraft-shapes-source.zip')
+        if not source.exists():source=Path(__file__).resolve().parents[1]/'deploy/liveries/aircraft-shapes-source.zip'
+        with zipfile.ZipFile(source) as z:
+            shapes=json.loads(z.read('aircraft-radar-shapes.json'))
+        if any(row.get('radar_shape') and shapes.get(row['icao'])!=row['radar_shape'] for row in snapshot['aircraft']):
+            raise ValueError('Radar artwork sources differ from captured geometry')
+        destination=output/'aircraft-shapes-source.zip';shutil.copyfile(source,destination)
+        descriptor['artwork_source']=metadata(destination)
     if capture is not None:
         validate_capture(capture)
         descriptor['capture']=capture
@@ -213,6 +223,9 @@ def verify(output,baselines=None):
         raise ValueError('Untrusted common release')
     expected={'content-release.json','SHA256SUMS.txt'}
     records=[descriptor['catalog'],descriptor['inventory'],descriptor['feed'],*descriptor['products']]
+    if 'artwork_source' in descriptor:
+        if descriptor['artwork_source'].get('file')!='aircraft-shapes-source.zip':raise ValueError('Invalid artwork source name')
+        records.append(descriptor['artwork_source'])
     if [row['id'] for row in descriptor['products']]!=list(PRODUCTS):
         raise ValueError('Both common product artifacts are required')
     for record in records:
@@ -236,13 +249,15 @@ def verify(output,baselines=None):
         raise ValueError('Common summaries differ from retained release inventories')
     if (inventory['version']!=version or inventory['sequence']!=sequence
             or any(feed.get(key)!=value for key,value in dict(schema=1,component='content',channel='stable',version=version,sequence=sequence,
-                requires=dict(content_reader=1,catalog_reader=1),products=descriptor['products']).items())
+                products=descriptor['products']).items())
             or feed['first_install']!=content_changes(None,inventory)['changes']):
         raise ValueError('Common feed or inventory identity differs')
     catalog=Package(output/descriptor['catalog']['file'])
     try:
         if catalog.kind!='catalog' or catalog.version!=version or catalog.manifest['sequence']!=sequence:
             raise ValueError('Common catalog identity differs')
+        if feed.get('requires')!={'content_reader':1,**catalog.manifest['requires']}:
+            raise ValueError('Common catalog reader requirement differs')
         snapshot=dict(schema=1,component='catalog',revision=catalog.manifest['revision'],
             assets_revision=catalog.manifest['assets_revision'],assets_sequence=0)
         for table in ('aircraft','airlines','aliases','registrations'):

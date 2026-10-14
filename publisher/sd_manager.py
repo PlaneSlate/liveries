@@ -189,13 +189,13 @@ class ContentPackage:
                         or header.get('requires')!={'content_reader':1}
                         or not isinstance(header.get('components'),list) or len(header['components'])!=2):
                     raise ValueError('Invalid shared content header')
-                digest=hashlib.sha256(raw);packages=[]
+                self.header=header;self.components={};digest=hashlib.sha256(raw);packages=[]
                 for kind,part in zip(('library','catalog'),header['components']):
                     if (not isinstance(part,dict) or part.get('kind')!=kind or type(part.get('bytes')) is not int
                             or not 1<=part['bytes']<=self.total or not isinstance(part.get('sha256'),str)
                             or not re.fullmatch('[a-f0-9]{64}',part['sha256'])):raise ValueError('Invalid content component')
                     progress('Gemeinsames Paket pruefen: '+kind)
-                    component=Path(self.temporary.name)/(kind+'.psu');component_hash=hashlib.sha256()
+                    component=Path(self.temporary.name)/(kind+'.psu');self.components[kind]=component;component_hash=hashlib.sha256()
                     with component.open('xb') as target:
                         left=part['bytes']
                         while left:
@@ -210,6 +210,7 @@ class ContentPackage:
             library,catalog=Package(packages[0]),None
             try:
                 catalog=Package(packages[1]);check_references(library,catalog,self.product)
+                self.library_version=library.version;self.library_manifest_sha256=sha(library.manifest_raw)
             finally:
                 library.close()
                 if catalog:catalog.close()
@@ -217,6 +218,42 @@ class ContentPackage:
             self.close();raise
     def close(self):self.temporary.cleanup()
 
+
+def delta_candidate(package,info,phase):
+    """USB-only optimization of a verified full package; no release asset is changed."""
+    if not isinstance(package,ContentPackage) or info.get('content_delta')!=1 or not info.get('content_ready'):return None
+    version=info.get('content_version','')
+    if not isinstance(version,str) or len(version)>40 or not re.fullmatch(r'\d+\.\d+\.\d+',version):return None
+    baseline=package.path.parent/f'{package.product}-content-{version}.psu'
+    if not baseline.is_file() or baseline.resolve()==package.path.resolve():return None
+    previous=None
+    try:
+        previous=ContentPackage(baseline,phase)
+        if previous.product!=package.product or previous.version!=version or previous.sequence!=info.get('content_sequence') or previous.library_version!=info.get('library') or previous.library_manifest_sha256!=info.get('library_manifest_sha256'):return None
+        from livery_delta import build_delta
+        from types import SimpleNamespace
+        library=Path(package.temporary.name)/'library-delta.psu'
+        phase('Unveraenderte Bilder anhand der geprueften Basis wiederverwenden …')
+        if library.exists():library.unlink()
+        stats=build_delta(package.components['library'],previous.components['library'],library)
+        parts=[]
+        for kind,path in [('library',library),('catalog',package.components['catalog'])]:
+            with path.open('rb') as source:checksum=hashlib.file_digest(source,'sha256').hexdigest()
+            parts.append(dict(kind=kind,bytes=path.stat().st_size,sha256=checksum))
+        header=compact(dict(package.header,components=parts)).encode()+b'\n';total=len(header)+sum(p['bytes'] for p in parts)
+        if total>=package.total:return None
+        target=Path(package.temporary.name)/'content-delta.psu';digest=hashlib.sha256(header)
+        with target.open('wb') as stream:
+            stream.write(header)
+            for path in (library,package.components['catalog']):
+                with path.open('rb') as source:
+                    while block:=source.read(65536):stream.write(block);digest.update(block)
+        phase(f"USB-Delta: {total/1048576:.1f} statt {package.total/1048576:.1f} MB · {stats['reused_files']} Bilder wiederverwenden")
+        return SimpleNamespace(kind='content',path=target,total=total,checksum=digest.hexdigest(),product=package.product,version=package.version,sequence=package.sequence)
+    except (ValueError,OSError,KeyError):
+        phase('Keine verwendbare Delta-Basis; vollstaendiges Paket verwenden …');return None
+    finally:
+        if previous:previous.close()
 
 def open_package(path,progress=lambda message:None):
     return ContentPackage(path,progress) if Path(path).suffix.lower()=='.psu' else Package(path,progress)
@@ -234,6 +271,8 @@ class Client:
         self.port.open()
         self.sequence = 0
         self.buffer = bytearray()
+        self.progress_supported=False
+        self.progress_callback=lambda event:None
 
     def close(self):
         self.port.close()
@@ -244,8 +283,11 @@ class Client:
         if len(message) > 10000:
             raise ValueError('USB-Nachricht ist zu gross.')
         self.port.write(b'@PS1 ' + message + b'\n')
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline:
+        finalizing=op in ('content-finish','activate','finish')
+        idle=90 if self.progress_supported or not finalizing else 900
+        deadline=time.monotonic()+idle
+        absolute=time.monotonic()+(1800 if finalizing else 300)
+        while time.monotonic()<min(deadline,absolute):
             self.buffer.extend(self.port.read(max(1, min(self.port.in_waiting, 16384))))
             while b'\n' in self.buffer:
                 line, _, rest = self.buffer.partition(b'\n')
@@ -255,22 +297,40 @@ class Client:
                 reply = json.loads(line[5:])
                 if reply.get('id') != self.sequence:
                     continue
+                if reply.get('progress') is True:
+                    if not self.progress_supported:continue
+                    if reply.get('phase') not in ('idle','receiving','verifying','activating','complete','failed','cancelled') or any(type(reply.get(k)) is not int or not 0<=reply[k]<=1024**3 for k in ('received','total','checked','files')):
+                        raise RuntimeError('Ungueltige USB-Fortschrittsmeldung.')
+                    deadline=time.monotonic()+idle
+                    self.progress_callback(reply)
+                    continue
                 if not reply.get('ok'):
                     raise RuntimeError(reply.get('error', 'USB-Fehler'))
+                if op=='info':self.progress_supported=reply.get('progress_protocol')==1
                 return reply
             if len(self.buffer) > 20000:
                 self.buffer.clear()
         raise TimeoutError('Keine Antwort. USB-Verbindung und Firmware pruefen.')
 
 
-def upload(client, package, progress=lambda done, total: None, cancelled=lambda: False):
+def upload(client, package, progress=lambda done, total: None, cancelled=lambda: False, phase=lambda message:None, use_delta=True):
     info = client.call('info')
     if info.get('protocol') != 1 or not info.get('sd'):
         raise RuntimeError('Keine verwendbare SD-Karte im Board.')
+    original=package
+    if use_delta:
+        package=delta_candidate(package,info,phase) or package
+    capable=info.get('progress_protocol')==1
+    options={'progress_protocol':1} if capable else {}
+    if capable and hasattr(client,'progress_callback'):
+        def on_progress(event):
+            labels={'verifying':'Dateien pruefen','activating':'Gemeinsam aktivieren','complete':'Abschluss bestaetigen','failed':'Fehler','cancelled':'Abgebrochen'}
+            if event['phase']!='receiving':phase(labels.get(event['phase'],'Vorbereiten')+(f" · {event['checked']}/{event['files']} Dateien" if event['files'] else '')+' …')
+        client.progress_callback=on_progress
     if package.kind=='content':
         if info.get('content_protocol')!=1 or info.get('product')!=package.product:
             raise RuntimeError('Firmware oder Produkt passt nicht zum gemeinsamen Paket.')
-        client.call('content-start',bytes=package.total,sha256=package.checksum)
+        client.call('content-start',bytes=package.total,sha256=package.checksum,**options)
         try:
             with package.path.open('rb') as source:
                 offset=0
@@ -280,13 +340,19 @@ def upload(client, package, progress=lambda done, total: None, cancelled=lambda:
                     if reply.get('offset')!=offset:raise RuntimeError('Unerwartete USB-Bestaetigung.')
                     progress(offset,package.total)
             if cancelled():raise InterruptedError('Abgebrochen; bisherige Inhalte bleiben aktiv.')
+            phase('Uebertragung abgeschlossen; pruefen und gemeinsam aktivieren …')
             return client.call('content-finish')
-        except BaseException:
+        except BaseException as error:
             try:client.call('abort')
             except Exception:pass
+            if package is not original and isinstance(error,RuntimeError) and not cancelled():
+                after=client.call('info')
+                if after.get('active') or any(after.get(k)!=info.get(k) for k in ('content_version','content_sequence','library','library_manifest_sha256','catalog')):raise
+                phase('Delta konnte nicht abgeschlossen werden; vollstaendiges Paket uebertragen …')
+                return upload(client,original,progress,cancelled,phase,use_delta=False)
             raise
     client.call('start', kind=package.kind, version=package.version, files=len(package.files),
-                plan_sha256=package.plan, manifest_sha256=sha(package.manifest_raw))
+                plan_sha256=package.plan, manifest_sha256=sha(package.manifest_raw),**({'total_bytes':package.total,**options} if capable else {}))
     done = 0
     try:
         for path, size, digest in package.files:
@@ -309,6 +375,7 @@ def upload(client, package, progress=lambda done, total: None, cancelled=lambda:
             progress(done, package.total)
         if cancelled():
             raise InterruptedError('Abgebrochen; bisheriges Paket bleibt aktiv.')
+        phase('Uebertragung abgeschlossen; Paket pruefen und aktivieren …')
         return client.call('activate', manifest=package.manifest_raw.decode('utf-8'))
     except BaseException:
         try:
@@ -385,7 +452,7 @@ def gui():
                 if package:
                     summary=(f'{package.total/1024/1024:.1f} MB gemeinsam uebertragen' if package.kind=='content' else f'{len(package.files)} Dateien uebertragen')
                     messages.put(('status', f'{package.version}: {summary} …'))
-                    upload(client, package, lambda d, t: messages.put(('progress', 100*d/max(t, 1))), cancel.is_set)
+                    upload(client, package, lambda d, t: messages.put(('progress', 100*d/max(t, 1))), cancel.is_set,lambda s:messages.put(('status',s)))
                     messages.put(('done', f'Fertig: {package.version} ist installiert. USB kann getrennt werden.'))
                 else:
                     info = client.call('info')

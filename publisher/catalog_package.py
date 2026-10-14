@@ -62,11 +62,16 @@ def validate(snapshot):
         result[table] = {}
         for row in source:
             if table == 'aircraft':
-                exact(row, AIRCRAFT_FIELDS + (('radar_symbol',) if 'radar_symbol' in row else ()))
+                exact(row, AIRCRAFT_FIELDS + (('radar_symbol',) if 'radar_symbol' in row else ()) + (('radar_shape',) if 'radar_shape' in row else ()))
                 if row.get('radar_symbol', '') not in ('', *RADAR_SYMBOLS):
                     raise ValueError('Invalid radar symbol')
-                for value in row.values():
-                    text(value)
+                shape = row.get('radar_shape')
+                if shape is not None:
+                    if (not isinstance(shape,list) or not 3 <= len(shape) <= 32 or
+                            any(not isinstance(p,list) or len(p)!=2 or any(type(v) is not int or not -100<=v<=100 for v in p) for p in shape)):
+                        raise ValueError('Invalid aircraft radar shape')
+                for field,value in row.items():
+                    if field != 'radar_shape':text(value)
                 key = row['icao']
                 if not re.fullmatch('[A-Z0-9]{2,4}', key):
                     raise ValueError('Invalid aircraft type')
@@ -137,7 +142,7 @@ def validate(snapshot):
     return result
 
 
-def build(snapshot, version, sequence):
+def build(snapshot, version, sequence, places=None):
     if (not isinstance(version, str)
             or not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version)
             or type(sequence) is not int or not 1 <= sequence <= 0xffffffff):
@@ -164,6 +169,17 @@ def build(snapshot, version, sequence):
     manifest = dict(schema=1, format='planeslate-catalog-v1', version=version, sequence=sequence,
                     revision=snapshot['revision'], assets_revision=snapshot['assets_revision'],
                     products=['micro_360', 'mini_800'], requires=dict(catalog_reader=1), tables=descriptors)
+    # Optional extension: older packages with exactly eight table files remain valid.
+    if places is None:
+        source = Path(__file__).with_name('cities.json.gz')
+        if not source.exists():
+            source = Path(__file__).resolve().parents[1] / 'embedded/web/cities.json.gz'
+        places = source.read_bytes()
+    if places:
+        path = prefix + 'cities.json.gz'
+        files[path] = places
+        manifest['places'] = dict(path=path, bytes=len(places), sha256=sha(places))
+        manifest['requires']['catalog_reader'] = 2
     files['catalog/manifest.json'] = encoded(manifest)
     if len(files['catalog/manifest.json']) > 4096:
         raise ValueError('Catalog manifest exceeds device budget')
@@ -211,10 +227,10 @@ def write_stream(files, output, product):
 
 def validate_package(manifest, read):
     """Verify the same bounded catalog accepted by the local firmware reader."""
-    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables'))
+    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables') + (('places',) if 'places' in manifest else ()))
     if (manifest['schema'] != 1 or manifest['format'] != 'planeslate-catalog-v1'
             or manifest['products'] != ['micro_360', 'mini_800']
-            or manifest['requires'] != {'catalog_reader': 1}
+            or manifest['requires'] != {'catalog_reader': 2 if 'places' in manifest else 1}
             or set(manifest['tables']) != set(TABLES)):
         raise ValueError('Unsupported catalog manifest or compatibility')
     if not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', manifest['version']):
@@ -224,6 +240,30 @@ def validate_package(manifest, read):
             raise ValueError('Invalid catalog sequence or revision')
     required, rows = {}, {}
     prefix = f"catalog/generations/{manifest['version']}/"
+    if 'places' in manifest:
+        meta = manifest['places']
+        exact(meta, ('path', 'bytes', 'sha256'))
+        if (meta['path'] != prefix+'cities.json.gz' or type(meta['bytes']) is not int
+                or not 1 <= meta['bytes'] <= 4*1024**2 or not isinstance(meta['sha256'], str)
+                or not re.fullmatch('[0-9a-f]{64}', meta['sha256'])):
+            raise ValueError('Invalid offline places reference')
+        raw = read(meta['path'], 4*1024**2)
+        if len(raw) != meta['bytes'] or sha(raw) != meta['sha256']:
+            raise ValueError('Offline places checksum mismatch')
+        # Bound expansion before parsing; reject zip bombs and malformed rows.
+        import zlib
+        decoder = zlib.decompressobj(31)
+        expanded = decoder.decompress(raw, 32*1024**2+1)
+        if len(expanded)>32*1024**2 or not decoder.eof or decoder.unused_data:
+            raise ValueError('Invalid offline places compression')
+        cities = json.loads(expanded)
+        if (not isinstance(cities,list) or not cities or any(not isinstance(row,list) or len(row)!=5
+                or not isinstance(row[0],str) or not isinstance(row[1],str) or not isinstance(row[4],str)
+                or any(type(row[i]) not in (float,int) for i in (2,3))
+                or not -90<=row[2]<=90 or not -180<=row[3]<=180
+                or len(encoded(row))>2048 for row in cities)):
+            raise ValueError('Invalid offline place row')
+        required[meta['path']] = (meta['bytes'], meta['sha256'], None)
     for name in TABLES:
         table = manifest['tables'][name]
         exact(table, ('entries', 'record_bytes', 'max_row_bytes', 'index', 'data'))
