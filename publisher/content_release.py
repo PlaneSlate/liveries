@@ -110,7 +110,7 @@ def summaries(available, baselines):
     entries=entries[:MAX_BASELINES];validate_summaries(entries,available['version'],available['sequence']);return entries
 
 
-def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None):
+def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=()):
     if repository not in ('PlaneSlate/planeslate', 'PlaneSlate/liveries') or set(libraries) != set(PRODUCTS):
         raise ValueError('Invalid common release inputs')
     baselines=tuple(baselines)
@@ -147,9 +147,32 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
         if not source.exists():source=Path(__file__).resolve().parents[1]/'deploy/liveries/aircraft-shapes-source.zip'
         with zipfile.ZipFile(source) as z:
             shapes=json.loads(z.read('aircraft-radar-shapes.json'))
-        if any(row.get('radar_shape') and shapes.get(row['icao'])!=row['radar_shape'] for row in snapshot['aircraft']):
+            historical=json.loads(z.read('historical-radar-shapes.json')) if 'historical-radar-shapes.json' in z.namelist() else {}
+        permitted=[*shapes.values(),*historical.values()]
+        uploads=[]
+        if not isinstance(radar_sources,(list,tuple)) or len(radar_sources)>1000:
+            raise ValueError('Invalid radar upload sources')
+        seen=set()
+        for item in radar_sources:
+            if (not isinstance(item,dict) or set(item)!={'id','name','points','svg','source_note'}
+                    or not isinstance(item['svg'],str) or len(item['svg'])>256*1024
+                    or not isinstance(item['name'],str) or len(item['name'])>100
+                    or not isinstance(item['source_note'],str) or len(item['source_note'])>500):
+                raise ValueError('Invalid radar upload metadata')
+            bound=json.dumps({'svg':item['svg'],'points':item['points']},ensure_ascii=False,separators=(',',':')).encode('utf-8')
+            identity='upload:'+sha(bound)
+            if item['id']!=identity or identity in seen:raise ValueError('Radar upload checksum mismatch')
+            seen.add(identity);permitted.append(item['points']);uploads.append(item)
+        if any(row.get('radar_shape') and row['radar_shape'] not in permitted for row in snapshot['aircraft']):
             raise ValueError('Radar artwork sources differ from captured geometry')
         destination=output/'aircraft-shapes-source.zip';shutil.copyfile(source,destination)
+        if uploads:
+            with zipfile.ZipFile(destination,'a',zipfile.ZIP_DEFLATED) as archive:
+                for item in sorted(uploads,key=lambda r:r['id']):
+                    info=zipfile.ZipInfo('uploads/'+item['id'].split(':')[1]+'.svg',(2026,10,15,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED
+                    archive.writestr(info,item['svg'].encode('utf-8'))
+                info=zipfile.ZipInfo('uploads/manifest.json',(2026,10,15,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED
+                archive.writestr(info,json.dumps(sorted(uploads,key=lambda r:r['id']),ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8'))
         descriptor['artwork_source']=metadata(destination)
     if capture is not None:
         validate_capture(capture)

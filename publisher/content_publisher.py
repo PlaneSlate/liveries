@@ -217,7 +217,7 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
                 raise ValueError('Image product checksum mismatch')
             libraries[product['id']]=path
         prepare(snapshot['device_catalog'],libraries,output/'content',snapshot['version'],snapshot['sequence'],
-                baselines,'PlaneSlate/liveries',capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
+                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
     return verify_captured(output/'content',snapshot,baselines)
 
 
