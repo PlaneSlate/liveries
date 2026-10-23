@@ -99,8 +99,8 @@ def validate(snapshot):
                 exact(row, ('key', 'registration', 'type', 'airline', 'operator', 'livery', 'special'))
                 key = text(row['key'], 16)
                 registration = text(row['registration'], 20)
-                if (not re.fullmatch('[A-Z0-9]{2,16}', key)
-                        or not re.fullmatch('[A-Z0-9]+(?:-[A-Z0-9]+)*', registration)
+                if (not re.fullmatch(r'(?:[A-Z0-9]{2,16}|[0-9]{2}\+[0-9]{2})', key)
+                        or not re.fullmatch(r'(?:[A-Z0-9]+(?:-[A-Z0-9]+)*|[0-9]{2}\+[0-9]{2})', registration)
                         or registration.replace('-', '') != key):
                     raise ValueError('Registration identity mismatch')
                 if not re.fullmatch('[A-Z0-9]{2,4}|', row['type']):

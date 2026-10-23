@@ -173,7 +173,7 @@ def validate_snapshot(s,job):
                 ids=operators.get(re.sub(r'[^a-z0-9]','',brand),[])
                 if p['airline']!='*' or 'registration' in p or not re.fullmatch(r'named:[a-zA-Z0-9_-]+',p['operator']) or ids!=[p['operator']]:
                     raise ValueError('Invalid named operator artwork mapping')
-            if 'registration' in p and (len(f['pairs'])!=1 or not re.fullmatch(r'[A-Z0-9][A-Z0-9-]{1,15}',p['registration']) or p['airline']!='*' or not f['filename'].endswith('_REG-'+p['registration'].replace('-','')+'.png')):
+            if 'registration' in p and (len(f['pairs'])!=1 or not re.fullmatch(r'(?:[A-Z0-9][A-Z0-9-]{1,15}|[0-9]{2}\+[0-9]{2})',p['registration']) or p['airline']!='*' or not f['filename'].endswith('_REG-'+p['registration'].replace('-','')+'.png')):
                 raise ValueError('Invalid registration artwork mapping')
     return files
 
