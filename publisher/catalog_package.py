@@ -19,7 +19,7 @@ AIRCRAFT_FIELDS = ('icao', 'iata_type', 'manufacturer', 'model', 'aircraft_type'
 # GENERATED RADAR CATEGORIES
 RADAR_SYMBOLS = ('airliner_standard', 'airliner_heavy', 'small_aircraft', 'business_jet', 'helicopter', 'glider', 'balloon', 'military')
 # END RADAR CATEGORIES
-CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'government')
+CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'government', 'military')
 
 
 def encoded(value):
@@ -79,7 +79,9 @@ def validate(snapshot):
                 if not re.fullmatch('[A-Z0-9]{2,4}', key):
                     raise ValueError('Invalid aircraft type')
             elif table == 'airlines':
-                exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in'))
+                exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') + (('military',) if 'military' in row else ()))
+                if 'military' in row and type(row['military']) is not bool:
+                    raise ValueError('Invalid military airline classification')
                 key = airline_id(row['id'])
                 if (not row['airline_name'] or not re.fullmatch('[A-Z]{3}|', row['icao'])
                         or not re.fullmatch('[A-Z0-9]{2}|', row['iata'])
