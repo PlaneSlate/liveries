@@ -110,12 +110,12 @@ def summaries(available, baselines):
     entries=entries[:MAX_BASELINES];validate_summaries(entries,available['version'],available['sequence']);return entries
 
 
-def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=()):
+def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=(), airport_logos=None):
     if repository not in ('PlaneSlate/planeslate', 'PlaneSlate/liveries') or set(libraries) != set(PRODUCTS):
         raise ValueError('Invalid common release inputs')
     baselines=tuple(baselines)
     validate(snapshot)
-    files = build_catalog(snapshot, version, sequence)
+    files = build_catalog(snapshot, version, sequence,airport_logos=airport_logos)
     inventory = content_inventory(snapshot, image_inventory(libraries), version, sequence)
     changes = summaries(inventory, baselines)
     first_install = content_changes(None, inventory)['changes']

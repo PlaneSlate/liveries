@@ -143,6 +143,15 @@ def load_capture(raw,job_id,checksum):
     if snapshot.get('component')!='content':raise ValueError('A common captured job is required')
     device=snapshot.get('device_catalog')
     validate(device)
+    chunks=snapshot.get('airport_chunks')
+    if chunks is not None:
+        if not isinstance(chunks,list) or len(chunks)>1200:raise ValueError('Invalid airport capture chunks')
+        for i,chunk in enumerate(chunks):
+            if (not isinstance(chunk,dict) or set(chunk)!={'key','bytes','sha256'}
+                    or chunk['key']!=f'content-snapshots/{job_id}/airports-{i}.json'
+                    or type(chunk['bytes']) is not int or not 2<=chunk['bytes']<=2*1024**2
+                    or not isinstance(chunk['sha256'],str) or not re.fullmatch('[a-f0-9]{64}',chunk['sha256'])):
+                raise ValueError('Invalid airport capture reference')
     for name,field in [('catalog_revision','revision'),('assets_revision','assets_revision')]:
         if type(snapshot.get(name)) is not int or snapshot[name]<0 or snapshot[name]!=device.get(field):
             raise ValueError('Common captured revision mismatch')
@@ -183,13 +192,39 @@ def image_alias_choices(snapshot):
             catalog.setdefault('choices',[]).append({'type':type_code,'airline':airline,'selected':canonical})
     return images
 
+def resolve_airport_chunks(snapshot,store):
+    if 'airport_chunks' not in snapshot or 'airports' in snapshot['device_catalog']:return
+    from airport_catalog import validate as validate_airports
+    rows=[];total=0
+    with tempfile.TemporaryDirectory() as directory:
+        for i,chunk in enumerate(snapshot['airport_chunks']):
+            target=Path(directory)/f'{i}.json'
+            store.get(chunk['key'],target,chunk['sha256'],2*1024**2)
+            raw=target.read_bytes();total+=len(raw)
+            if len(raw)!=chunk['bytes'] or sha(raw)!=chunk['sha256'] or total>128*1024**2:raise ValueError('Airport capture checksum or size mismatch')
+            part=json.loads(raw)
+            if not isinstance(part,list) or len(part)>128 or len(rows)+len(part)>150000:raise ValueError('Invalid airport capture rows')
+            rows.extend(part)
+    snapshot['device_catalog']['airports']=validate_airports(rows)
+
+
 def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,logo_cache=None):
+    resolve_airport_chunks(snapshot,store)
     output=Path(output)
     # Completed retries verify the same artifacts. Partial directories fail
     # closed; a fresh workflow attempt can rebuild using the same snapshot/cache.
     if output.exists():
         return verify_captured(output/'content',snapshot,baselines)
     output.mkdir(parents=True)
+    airport_logos={};airport_logo_bytes=0
+    for airport in snapshot['device_catalog'].get('airports',[]):
+        logo=airport.get('logo')
+        if not logo or logo['sha256'] in airport_logos:continue
+        folder=output/'airport-originals';folder.mkdir(exist_ok=True)
+        path=folder/(logo['sha256']+'.png');store.get(logo['key'],path,logo['sha256'],512*1024)
+        airport_logo_bytes+=path.stat().st_size
+        if airport_logo_bytes>64*1024**2:raise ValueError('Airport logo capture exceeds budget')
+        airport_logos[logo['sha256']]=path
     images=output/'images'
     build_snapshot(image_alias_choices(snapshot),store,images,conversion_cache=conversion_cache,logo_cache=logo_cache)
     draft=images/'release'
@@ -217,7 +252,7 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
                 raise ValueError('Image product checksum mismatch')
             libraries[product['id']]=path
         prepare(snapshot['device_catalog'],libraries,output/'content',snapshot['version'],snapshot['sequence'],
-                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
+                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
     return verify_captured(output/'content',snapshot,baselines)
 
 

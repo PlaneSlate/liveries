@@ -48,7 +48,10 @@ def airline_id(value):
 
 
 def validate(snapshot):
-    exact(snapshot, ('schema', 'component', 'revision', 'assets_revision', 'assets_sequence', *TABLES))
+    exact(snapshot, ('schema', 'component', 'revision', 'assets_revision', 'assets_sequence', *TABLES) + (('airports',) if 'airports' in snapshot else ()))
+    if 'airports' in snapshot:
+        from airport_catalog import validate as validate_airports
+        validate_airports(snapshot['airports'])
     if snapshot['schema'] != 1 or snapshot['component'] != 'catalog':
         raise ValueError('Unknown catalog snapshot')
     for field in ('revision', 'assets_revision', 'assets_sequence'):
@@ -142,7 +145,7 @@ def validate(snapshot):
     return result
 
 
-def build(snapshot, version, sequence, places=None):
+def build(snapshot, version, sequence, places=None, airport_logos=None):
     if (not isinstance(version, str)
             or not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version)
             or type(sequence) is not int or not 1 <= sequence <= 0xffffffff):
@@ -180,6 +183,13 @@ def build(snapshot, version, sequence, places=None):
         files[path] = places
         manifest['places'] = dict(path=path, bytes=len(places), sha256=sha(places))
         manifest['requires']['catalog_reader'] = 2
+    if 'airports' in snapshot:
+        from airport_catalog import build as build_airports
+        raw = build_airports(snapshot['airports'],airport_logos)
+        path = prefix + 'airports.bin'
+        files[path] = raw
+        manifest['airports'] = dict(path=path, bytes=len(raw), sha256=sha(raw))
+        manifest['requires']['catalog_reader'] = 3
     files['catalog/manifest.json'] = encoded(manifest)
     if len(files['catalog/manifest.json']) > 4096:
         raise ValueError('Catalog manifest exceeds device budget')
@@ -227,10 +237,10 @@ def write_stream(files, output, product):
 
 def validate_package(manifest, read):
     """Verify the same bounded catalog accepted by the local firmware reader."""
-    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables') + (('places',) if 'places' in manifest else ()))
+    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables') + (('places',) if 'places' in manifest else ()) + (('airports',) if 'airports' in manifest else ()))
     if (manifest['schema'] != 1 or manifest['format'] != 'planeslate-catalog-v1'
             or manifest['products'] != ['micro_360', 'mini_800']
-            or manifest['requires'] != {'catalog_reader': 2 if 'places' in manifest else 1}
+            or manifest['requires'] != {'catalog_reader': 3 if 'airports' in manifest else 2 if 'places' in manifest else 1}
             or set(manifest['tables']) != set(TABLES)):
         raise ValueError('Unsupported catalog manifest or compatibility')
     if not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', manifest['version']):
@@ -240,6 +250,16 @@ def validate_package(manifest, read):
             raise ValueError('Invalid catalog sequence or revision')
     required, rows = {}, {}
     prefix = f"catalog/generations/{manifest['version']}/"
+    if 'airports' in manifest:
+        from airport_catalog import check as check_airports
+        meta = manifest['airports']
+        exact(meta, ('path','bytes','sha256'))
+        if meta['path'] != prefix+'airports.bin' or type(meta['bytes']) is not int or not 16<=meta['bytes']<=128*1024**2 or not isinstance(meta['sha256'],str) or not re.fullmatch('[a-f0-9]{64}',meta['sha256']):
+            raise ValueError('Invalid airport catalog reference')
+        raw=read(meta['path'],128*1024**2)
+        if len(raw)!=meta['bytes'] or sha(raw)!=meta['sha256']:raise ValueError('Airport catalog checksum mismatch')
+        check_airports(raw)
+        required[meta['path']] = (meta['bytes'],meta['sha256'],None)
     if 'places' in manifest:
         meta = manifest['places']
         exact(meta, ('path', 'bytes', 'sha256'))
