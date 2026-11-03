@@ -71,7 +71,7 @@ def validate_aircraft_type_data(data):
     limits = {'length_m': 200, 'wingspan_m': 200, 'height_m': 100,
               'typical_seating_min': 1500, 'typical_seating_max': 1500,
               'range_km': 40000, 'mtow_kg': 2000000}
-    strings = {'range_kind': 20, 'variant_notes': 1000, 'description_de': 2000,
+    strings = {'typical_seats': 120, 'range_kind': 20, 'variant_notes': 1000, 'description_de': 2000,
                'description_en': 2000, 'wikipedia_url': 2048}
     if not isinstance(data, dict) or set(data) - {*limits, *strings, 'sources', 'wikipedia'} or len(encoded(data)) > 6500:
         raise ValueError('Invalid or oversized aircraft type data')
