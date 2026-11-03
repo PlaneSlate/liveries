@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter
 from PIL import Image
+from build_livery_release import artwork_paths
 
 
 def _checked_logo(path,asset):
@@ -94,9 +95,10 @@ def append_logos(archive_path,logos,store,work,logo_cache=None,*,layouts=('compa
     print('Logo fetch + verification: unique=%d cache_hits=%d cache_misses=%d seconds=%.3f'%(len(assets),hits,len(assets)-hits,perf_counter()-started),flush=True)
     print('Logo timings: downloads=%d network_worker_seconds=%.3f validation_worker_seconds=%.3f'%(downloads,network_seconds,validation_seconds),flush=True)
     started=perf_counter()
+    paths=artwork_paths(assets.values(),prefix+'logos/')
     for icao,layout,asset in entries:
         sha=asset['sha256'];data=verified[sha]
-        path=prefix+sha+'.png';contents[path]=data
+        path=paths[sha];contents[path]=data
         rows.append(dict(asset_type='airline_logo',review_status='cleared',type='LOGO',airline=icao,layout=layout,path=path,sha256=sha,bytes=len(data),width=asset['width'],height=asset['height']))
     contents[index]=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in sorted(rows,key=lambda r:(r.get('asset_type','livery'),r['type'],r['airline'],r['layout'])))
     manifest['index'].update(bytes=len(contents[index]),sha256=hashlib.sha256(contents[index]).hexdigest(),entries=len(rows))

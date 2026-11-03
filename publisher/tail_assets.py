@@ -10,6 +10,7 @@ import re
 import zipfile
 from pathlib import Path
 from PIL import Image
+from build_livery_release import artwork_paths
 
 
 def validate_tails(tails):
@@ -37,6 +38,7 @@ def append_tails(archive_path,tails,store,work):
     rows=[json.loads(raw) for raw in contents[index].splitlines()]
     rows=[row for row in rows if row.get('type')!='TAIL']
     prefix='library/generations/'+manifest['version']+'/'
+    paths=artwork_paths(tails,prefix+'tails/')
     verified={}
     print('Verifying captured airline tails:',len(tails),flush=True)
     for number,tail in enumerate(sorted(tails,key=lambda row:row['icao']),1):
@@ -55,7 +57,7 @@ def append_tails(archive_path,tails,store,work):
         data,width,height=verified[digest]
         if (width,height)!=(tail['width'],tail['height']) or len(data)!=tail['bytes']:
             raise ValueError('Conflicting airline tail metadata')
-        path=prefix+'tail-'+digest+'.png';contents[path]=data
+        path=paths[digest];contents[path]=data
         rows.append(dict(type='TAIL',airline=tail['icao'],layout='large',asset_type='airline_logo',
                          review_status='cleared',path=path,sha256=digest,bytes=len(data),width=width,height=height))
         if number%50==0 or number==len(tails):
