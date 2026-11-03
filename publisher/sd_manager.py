@@ -113,7 +113,7 @@ class Package:
                 if original is not None and (not isinstance(original,str) or len(original)>240 or original.startswith('.') or any(c in original for c in '/\\:') or not original.endswith('.png')):
                     raise ValueError('Invalid original artwork filename')
                 asset_type=e.get('asset_type','livery')
-                if asset_type not in ('livery','airline_logo','registration_livery') or (asset_type=='airline_logo' and (e['type']!='LOGO' or e.get('review_status')!='cleared')): raise ValueError('Invalid or uncleared asset type')
+                if asset_type not in ('livery','airline_logo','registration_livery') or (asset_type=='airline_logo' and (e['type'] not in ('LOGO','TAIL') or e.get('review_status')!='cleared' or (e['type']=='TAIL' and e['layout']!='large'))): raise ValueError('Invalid or uncleared asset type')
                 if asset_type=='registration_livery' and (not original or e['airline']!='*'): raise ValueError('Invalid registration artwork identity')
                 key = (e['type'], e['airline'], e['layout'])
                 identity=(asset_type,*key,original if asset_type=='registration_livery' else '')

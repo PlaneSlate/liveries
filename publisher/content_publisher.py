@@ -19,6 +19,8 @@ from publisher import (build_snapshot, validate_snapshot, CachedOriginals, Local
 from catalog_package import encoded, sha, validate
 from content_release import prepare, verify, validate_capture, PRODUCTS
 from content_changes import validate_inventory
+from tail_assets import append_tails,validate_tails
+from logo_assets import append_logos
 
 REPOSITORY='PlaneSlate/liveries'
 
@@ -143,6 +145,7 @@ def load_capture(raw,job_id,checksum):
     if snapshot.get('component')!='content':raise ValueError('A common captured job is required')
     device=snapshot.get('device_catalog')
     validate(device)
+    validate_tails(snapshot.get('tails',[]))
     chunks=snapshot.get('airport_chunks')
     if chunks is not None:
         if not isinstance(chunks,list) or len(chunks)>1200:raise ValueError('Invalid airport capture chunks')
@@ -251,6 +254,9 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
             if total!=item['bytes'] or digest(path)!=item['sha256']:
                 raise ValueError('Image product checksum mismatch')
             libraries[product['id']]=path
+        standard_logos=[logo for logo in snapshot.get('logos',[]) if re.fullmatch('[A-Z]{3}',logo.get('icao','')) and logo.get('import_status')=='valid' and logo.get('review_status')=='cleared' and logo.get('review_note')]
+        append_logos(libraries['mini_800'],standard_logos,store,output,logo_cache=logo_cache,layouts=('large',))
+        append_tails(libraries['mini_800'],snapshot.get('tails',[]),store,output/'tail-originals')
         prepare(snapshot['device_catalog'],libraries,output/'content',snapshot['version'],snapshot['sequence'],
                 baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
     return verify_captured(output/'content',snapshot,baselines)

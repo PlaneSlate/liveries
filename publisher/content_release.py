@@ -67,7 +67,12 @@ def image_inventory(libraries):
                     continue
                 variant = {key:row[key] for key in ('sha256', 'bytes', 'width', 'height')}
                 if row.get('asset_type', 'livery') == 'airline_logo':
-                    raise ValueError('Airline logos are not supported in Mini/Micro content packs')
+                    if product!='mini_800' or row['type'] not in ('TAIL','LOGO') or row['layout']!='large':
+                        raise ValueError('Airline logos require the large Plus library')
+                    identity=row['airline']
+                    variant_key=product+'-'+row['type'].lower()
+                    if variant_key in logos[identity]:raise ValueError('Duplicate airline logo identity')
+                    logos[identity][variant_key]=variant
                 else:
                     name = row.get('source_filename')
                     if not name:
@@ -83,7 +88,7 @@ def image_inventory(libraries):
             package.close()
     # Product/layout agreement prevents advertising a complete shared update
     # whose images exist for only one of the two production products.
-    for variants in [*images.values(), *logos.values()]:
+    for variants in images.values():
         if set(variants) != set(PRODUCTS):
             raise ValueError('Image identity missing from one production product')
     return dict(files=[dict(filename=name, sha256=sha(encoded(variants)),

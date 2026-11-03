@@ -55,7 +55,8 @@ def _fetch_logo(asset,store,work,cache):
     return data,False,download_seconds,check_seconds,downloaded
 
 
-def append_logos(archive_path,logos,store,work,logo_cache=None):
+def append_logos(archive_path,logos,store,work,logo_cache=None,*,layouts=('compact','large')):
+    if not layouts or any(layout not in ('compact','large') for layout in layouts):raise ValueError('Invalid logo layouts')
     if len(logos)>10000:raise ValueError('Too many logos')
     with zipfile.ZipFile(archive_path) as archive:
         contents={n:archive.read(n) for n in archive.namelist()}
@@ -74,6 +75,7 @@ def append_logos(archive_path,logos,store,work,logo_cache=None):
         seen.add(icao)
         if logo.get('review_status')!='cleared' or not logo.get('review_note') or logo.get('import_status')!='valid':raise ValueError('Uncleared logo cannot be distributed')
         for layout,name,box in [('compact','compact',(48,48)),('large','detail',(192,96))]:
+            if layout not in layouts:continue
             asset=logo['variants'][name];sha=asset['sha256']
             if not re.fullmatch('[a-f0-9]{64}',sha) or asset['key']!='logos/variants/'+sha+'.png' or type(asset['bytes']) is not int or not 0<asset['bytes']<=512*1024:raise ValueError('Invalid logo reference')
             if any(type(asset.get(k)) is not int or not 0<asset[k]<=limit for k,limit in [('width',box[0]),('height',box[1])]):raise ValueError('Invalid logo dimensions/format')
