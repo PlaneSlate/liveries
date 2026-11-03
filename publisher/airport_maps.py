@@ -222,9 +222,9 @@ def transform(bounds,width,height,padding=0.08,circular=False):
 def pixel(lon,lat,meta):
  x,y=project(lon,lat);b=meta['rendering_bounds']
  return (x-b['min_x'])/(b['max_x']-b['min_x'])*meta['width'],(b['max_y']-y)/(b['max_y']-b['min_y'])*meta['height']
-def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='normal',optional=True,bbox=None,version=1):
+def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='none',optional=True,bbox=None,version=1):
  if style not in PALETTES or variant not in (*VARIANTS,'master'):raise ValueError('Invalid map style/variant')
- if density not in ('essential','normal','detailed'):raise ValueError('Invalid label density')
+ if density not in ('none','essential','normal','detailed'):raise ValueError('Invalid label density')
  width,height=size or (VARIANTS.get(variant) or (2048,2048));bounds=validate_bounds(bbox or geo['bounds'])
  # Manual bounds may enlarge the diagram, but may not silently clip source infrastructure.
  b=geo['bounds']
@@ -266,7 +266,7 @@ def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='norm
    x,y=pts[0];draw.ellipse((x-2,y-2,x+2,y+2),fill=pal['gate'])
   label=(p.get('name') or p.get('ref')) if k=='terminal' else p.get('ref') or p.get('name')
   priority={'runway':0,'terminal':1,'taxiway':2,'gate':3,'parking_position':4}.get(k,9)
-  if label and priority<5 and (priority<2 or variant!='thumbnail' and density!='essential' and (priority<3 or density=='detailed')):
+  if density!='none' and label and priority<5 and (priority<2 or variant!='thumbnail' and density!='essential' and (priority<3 or density=='detailed')):
    x,y=pts[len(pts)//2] if g['type']=='LineString' else (sum(v[0] for v in pts)/len(pts),sum(v[1] for v in pts)/len(pts))
    # Runway references are sourced, never inferred from an angle. A two-end ref
    # is split only when its supplied directions agree with the measured axis.

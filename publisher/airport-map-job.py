@@ -43,7 +43,7 @@ def run(store,job,work,save):
  for variant,size in variants.items():
   for style in PALETTES:
    progress('Rendering '+variant+' / '+style)
-   png,meta=render(geo,variant,style,size=size,padding=options.get('padding',.08),density=options.get('density','normal'),optional=options.get('optional',True),bbox=options.get('bounds'),version=job['version'])
+   png,meta=render(geo,variant,style,size=size,padding=options.get('padding',.08),density=options.get('density','none'),optional=options.get('optional',True),bbox=options.get('bounds'),version=job['version'])
    assets.append(dict(**asset(png,'.png'),metadata=meta))
  return dict(schema=1,id=id,mode='render',identity=job['identity'],version=job['version'],assets=assets,source=source,options=options,counts=geo['counts'],warnings=geo['warnings'],bounds=geo['bounds'],generated_at=datetime.now(timezone.utc).isoformat())
 def main():
