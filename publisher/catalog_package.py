@@ -23,6 +23,44 @@ RADAR_SYMBOLS = ('airliner_standard', 'airliner_heavy', 'small_aircraft', 'busin
 # END RADAR CATEGORIES
 CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'government', 'military')
 
+AIRLINE_DETAILS = ('full_name', 'country_code', 'callsign', 'description_de', 'description_en',
+                   'wikipedia_url_de', 'wikipedia_url_en', 'sources', 'logo_ref', 'updated_at')
+
+
+def validate_airline_details(row):
+    for field in AIRLINE_DETAILS:
+        if field not in row or field == 'sources':
+            continue
+        text(row[field])
+    if row.get('country_code') and not re.fullmatch('[A-Z]{2}', row['country_code']):
+        raise ValueError('Invalid airline country code')
+    if row.get('logo_ref') and row['logo_ref'] != row['id']:
+        raise ValueError('Airline logo identity mismatch')
+    for language in ('de', 'en'):
+        value = row.get('wikipedia_url_' + language, '')
+        if value:
+            url = urlparse(value)
+            if (url.scheme != 'https' or url.netloc != language + '.wikipedia.org'
+                    or not url.path.startswith('/wiki/') or len(url.path) <= 6 or url.query or url.fragment):
+                raise ValueError('Invalid Wikipedia article URL')
+    sources = row.get('sources', {})
+    if not isinstance(sources, dict) or set(sources) - {'de', 'en'}:
+        raise ValueError('Invalid airline attribution')
+    required = {'provider', 'language', 'qid', 'article_id', 'title', 'article_url', 'revision_id',
+                'revision_url', 'retrieved_at', 'license', 'license_url', 'attribution', 'history_url',
+                'adaptation', 'translated'}
+    for language, source in sources.items():
+        exact(source, required)
+        for field in required - {'article_id', 'revision_id', 'translated'}:
+            text(source[field])
+            if not source[field]:
+                raise ValueError('Missing airline source metadata')
+        if (source['language'] != language or source['provider'] != 'Wikipedia'
+                or not re.fullmatch('Q[1-9][0-9]*', source['qid'])
+                or type(source['translated']) is not bool
+                or any(type(source[f]) is not int or source[f] < 1 for f in ('article_id', 'revision_id'))):
+            raise ValueError('Invalid airline source revision or identity')
+
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), sort_keys=True).encode('utf-8')
@@ -136,14 +174,14 @@ def validate(snapshot):
                 if not re.fullmatch('[A-Z0-9]{2,4}', key):
                     raise ValueError('Invalid aircraft type')
             elif table == 'airlines':
-                exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') + (('military',) if 'military' in row else ()))
+                exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') +
+                      (('military',) if 'military' in row else ()) + tuple(f for f in AIRLINE_DETAILS if f in row))
+                validate_airline_details(row)
                 if 'military' in row and type(row['military']) is not bool:
                     raise ValueError('Invalid military airline classification')
                 key = airline_id(row['id'])
                 if (not row['airline_name'] or not re.fullmatch('[A-Z]{3}|', row['icao'])
-                        or not re.fullmatch('[A-Z0-9]{2}|', row['iata'])
-                        or (key.startswith('named:') and (row['icao'] or row['iata']))
-                        or (not key.startswith('named:') and key != row['icao'])):
+                        or not re.fullmatch('[A-Z0-9]{2}|', row['iata'])):
                     raise ValueError('Invalid airline codes or name')
                 text(row['airline_name'], 120)
                 text(row['registered_in'], 80)
