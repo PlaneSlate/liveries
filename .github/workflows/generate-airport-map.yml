@@ -35,3 +35,12 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: python publisher/airport-map-job.py
+      - name: Return verified job files to Admin
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airport-map-${{ inputs.job_id }}
+          path: airport-map-output/*
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: ignore

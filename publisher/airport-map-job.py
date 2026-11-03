@@ -53,9 +53,16 @@ def main():
  with tempfile.TemporaryDirectory() as directory:
   work=Path(directory);path=work/'input.json';store.get(key,path,checksum,32768);job=json.loads(path.read_bytes())
   if job['id']!=id:raise ValueError('Job mismatch')
-  try:result=run(store,job,work,lambda key,raw,content:put(store,key,raw,content))
+  # Existing publisher credentials remain read-only. The authenticated Admin
+  # imports this job-scoped build artifact using its own R2 binding.
+  output=Path('airport-map-output');output.mkdir(exist_ok=True)
+  def save(key,raw,content='application/json'):
+   prefix='airport-maps/jobs/'+id+'/'
+   if not key.startswith(prefix) or not re.fullmatch(r'[a-zA-Z0-9_.-]+',key[len(prefix):]):raise ValueError('Invalid map output')
+   (output/key[len(prefix):]).write_bytes(raw)
+  try:result=run(store,job,work,save)
   except Exception as error:
-   put(store,'airport-maps/jobs/'+id+'/result.json',encoded(dict(schema=1,id=id,error=str(error)[:240])))
+   save('airport-maps/jobs/'+id+'/result.json',encoded(dict(schema=1,id=id,error=str(error)[:240])))
    raise
-  put(store,'airport-maps/jobs/'+id+'/result.json',encoded(result))
+  save('airport-maps/jobs/'+id+'/result.json',encoded(result))
 if __name__=='__main__':main()
