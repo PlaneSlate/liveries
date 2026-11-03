@@ -149,14 +149,14 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
         products.append(dict(result, kind='content', file=path.name,
             url='https://github.com/'+repository+'/releases/download/content-'+version+'/'+path.name))
     (output/'content-inventory.json').write_bytes(encoded(inventory)+b'\n')
-    if catalogs:
-        plus=output/('plus_1280-content-'+version+'.psu')
-        build_content(libraries['mini_800'],output/catalogs['plus']['file'],plus,'mini_800',version,sequence)
-        extra_assets.append(metadata(plus))
+    plus=output/('plus_1280-content-'+version+'.psu')
+    build_content(libraries['mini_800'],output/catalogs['plus']['file'] if catalogs else catalog,plus,'mini_800',version,sequence)
+    plus_asset=dict(metadata(plus),url='https://github.com/'+repository+'/releases/download/content-'+version+'/'+plus.name,format='planeslate-content-v1')
+    if catalogs:plus_asset['airport_variant']='plus'
     feed = dict(schema=1, component='content', channel='stable', version=version, sequence=sequence,
         requires=dict(content_reader=1, catalog_reader=4 if catalogs else json.loads(files['catalog/manifest.json'])['requires']['catalog_reader']), products=products,
         changes=changes, first_install=first_install)
-    if catalogs:feed['device_assets']={'plus_1280':dict(metadata(plus),url='https://github.com/'+repository+'/releases/download/content-'+version+'/'+plus.name,airport_variant='plus',format='planeslate-content-v1')}
+    feed['device_assets']={'plus_1280':plus_asset}
     raw = encoded(feed)+b'\n'
     if len(raw) > 16384:
         raise ValueError('Common update feed exceeds device budget')
@@ -167,6 +167,7 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
         catalog=metadata(catalog), inventory=metadata(output/'content-inventory.json'),
         feed=metadata(output/'content-updates.json'), products=products,
         release_tag='content-'+version, repository=repository)
+    descriptor['device_assets']={'plus_1280':plus_asset}
     if catalogs:descriptor['airport_map_catalogs']=catalogs
     current_maps={a['icao']:sha(encoded(a['maps'])) for a in snapshot.get('airports',[]) if a.get('maps')}
     if current_maps or airport_map_baselines:
@@ -287,6 +288,10 @@ def verify(output,baselines=None):
         if set(map_catalogs)!={'mini','plus'}:raise ValueError('Both airport map catalogs required')
         records.extend(map_catalogs.values())
     records.extend(descriptor.get('airport_map_assets',[]))
+    device_assets=descriptor.get('device_assets',{})
+    if device_assets:
+        if not isinstance(device_assets,dict) or set(device_assets)!={'plus_1280'}:raise ValueError('Invalid supplemental device products')
+        records.extend(device_assets.values())
     if 'artwork_source' in descriptor:
         if descriptor['artwork_source'].get('file')!='aircraft-shapes-source.zip':raise ValueError('Invalid artwork source name')
         records.append(descriptor['artwork_source'])
@@ -307,6 +312,8 @@ def verify(output,baselines=None):
     feed_raw=(output/descriptor['feed']['file']).read_bytes()
     if len(feed_raw)>16384:raise ValueError('Common feed exceeds budget')
     feed=json.loads(feed_raw)
+    if device_assets and feed.get('device_assets')!=device_assets:raise ValueError('Supplemental device feed differs from receipt')
+    if map_catalogs and 'plus_1280' not in feed.get('device_assets',{}):raise ValueError('Plus airport content missing')
     validate_summaries(feed['changes'],version,sequence)
     inventory=json.loads((output/descriptor['inventory']['file']).read_bytes());validate_inventory(inventory)
     if baselines is not None and feed['changes']!=summaries(inventory,baselines):
@@ -335,8 +342,8 @@ def verify(output,baselines=None):
         with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
             libraries={}
             product_records=list(descriptor['products'])
-            if map_catalogs:
-                extra=feed.get('device_assets',{}).get('plus_1280',{})
+            if 'plus_1280' in feed.get('device_assets',{}):
+                extra=feed['device_assets']['plus_1280']
                 product_records.append(dict(extra,id='plus_1280',kind='content'))
             for record in product_records:
                 product=record['id'];filename=product+'-content-'+version+'.psu'
