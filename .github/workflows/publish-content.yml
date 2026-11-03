@@ -55,7 +55,7 @@ jobs:
           path: logo-cache
           key: livery-logos-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: livery-logos-v1-
-      - name: Build, verify and publish common Mini and Micro content
+      - name: Build, verify and publish common Micro, Mini and Plus content
         env:
           JOB_ID: ${{ inputs.job_id }}
           SNAPSHOT_KEY: ${{ inputs.snapshot_key }}
@@ -65,4 +65,4 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: tools/bin/python source/publisher/content_publisher.py --publish --original-cache original-cache --conversion-cache conversion-cache --logo-cache logo-cache
+        run: tools/bin/python -u source/publisher/content_publisher.py --publish --original-cache original-cache --conversion-cache conversion-cache --logo-cache logo-cache

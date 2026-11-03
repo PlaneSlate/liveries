@@ -15,7 +15,7 @@ import urllib.parse
 import zipfile
 
 from publisher import (build_snapshot, validate_snapshot, CachedOriginals, LocalR2,
-                       R2, digest, GitHub)
+                       R2, digest, GitHub, phase)
 from catalog_package import encoded, sha, validate
 from content_release import prepare, verify, validate_capture, PRODUCTS
 from content_changes import validate_inventory
@@ -61,8 +61,10 @@ class ContentGitHub(GitHub):
     def published_receipts(self):
         releases=self.request('GET','/releases?per_page=100')
         results=[]
+        print('Checking published common release receipts',flush=True)
         for release in releases:
             if not release.get('tag_name','').startswith('content-') or release['draft'] or release['prerelease']:continue
+            print('Checking receipt:',release['tag_name'],flush=True)
             receipt=json.loads(read_release_asset(release,'content-release.json',16384))
             if (receipt.get('schema')!=1 or receipt.get('state')!='verified' or receipt.get('component')!='content'
                     or receipt.get('repository')!=REPOSITORY or receipt.get('release_tag')!=release['tag_name']
@@ -86,6 +88,7 @@ class ContentGitHub(GitHub):
                 raise ValueError('A newer common release is already published')
             if receipt['version']==version:continue
             if len(results)>=16:break
+            print('Loading baseline:',receipt['version'],flush=True)
             raw=read_release_asset(release,'content-inventory.json',64*1024**2)
             inventory=json.loads(raw);validate_inventory(inventory)
             record=receipt['inventory']
@@ -130,7 +133,10 @@ def publish_captured(output,snapshot,github,baselines=()):
         return actual
     present=check_assets(release,not release['draft'])
     for name,path in paths.items():
-        if name not in present:github.upload(release['id'],path)
+        if name not in present:
+            print('Uploading common asset:',name,'bytes='+str(path.stat().st_size),flush=True)
+            github.upload(release['id'],path)
+            print('Uploaded common asset:',name,flush=True)
     checked=github.request('GET','/releases/'+str(release['id']));check_assets(checked,True)
     # Reverify local content and remote sequence immediately before public visibility.
     verify_captured(output,snapshot,baselines)
@@ -208,6 +214,8 @@ def resolve_airport_chunks(snapshot,store):
     if 'airport_chunks' not in snapshot or 'airports' in snapshot['device_catalog']:return
     from airport_catalog import validate as validate_airports
     rows=[];total=0
+    count=len(snapshot['airport_chunks'])
+    print('Loading captured airport chunks:',count,flush=True)
     with tempfile.TemporaryDirectory() as directory:
         for i,chunk in enumerate(snapshot['airport_chunks']):
             target=Path(directory)/f'{i}.json'
@@ -217,11 +225,14 @@ def resolve_airport_chunks(snapshot,store):
             part=json.loads(raw)
             if not isinstance(part,list) or len(part)>128 or len(rows)+len(part)>150000:raise ValueError('Invalid airport capture rows')
             rows.extend(part)
+            if (i+1)%25==0 or i+1==count:
+                print('Captured airport chunks:',str(i+1)+'/'+str(count),'rows='+str(len(rows)),flush=True)
     snapshot['device_catalog']['airports']=validate_airports(rows)
 
 
 def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,logo_cache=None,airport_map_baselines=None):
-    resolve_airport_chunks(snapshot,store)
+    with phase('captured airport catalog'):
+        resolve_airport_chunks(snapshot,store)
     output=Path(output)
     # Completed retries verify the same artifacts. Partial directories fail
     # closed; a fresh workflow attempt can rebuild using the same snapshot/cache.
@@ -229,6 +240,7 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
         return verify_captured(output/'content',snapshot,baselines)
     output.mkdir(parents=True)
     airport_logos={};airport_logo_bytes=0
+    print('Loading captured airport logos:',len({a['logo']['sha256'] for a in snapshot['device_catalog'].get('airports',[]) if a.get('logo')}),flush=True)
     for airport in snapshot['device_catalog'].get('airports',[]):
         logo=airport.get('logo')
         if not logo or logo['sha256'] in airport_logos:continue
@@ -237,6 +249,9 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
         airport_logo_bytes+=path.stat().st_size
         if airport_logo_bytes>64*1024**2:raise ValueError('Airport logo capture exceeds budget')
         airport_logos[logo['sha256']]=path
+        if len(airport_logos)%25==0:
+            print('Captured airport logos loaded:',len(airport_logos),flush=True)
+    print('Captured airport logos ready:',len(airport_logos),flush=True)
     images=output/'images'
     build_snapshot(image_alias_choices(snapshot),store,images,conversion_cache=conversion_cache,logo_cache=logo_cache)
     draft=images/'release'
@@ -284,19 +299,26 @@ def main():
     args=parser.parse_args()
     if args.publish and args.local_store:raise ValueError('Local verification cannot publish')
     job,key,checksum=(os.environ[name] for name in ('JOB_ID','SNAPSHOT_KEY','SNAPSHOT_SHA256'))
+    print('Starting common content publisher for Micro, Mini and Plus',flush=True)
     if key!='content-snapshots/'+job+'.json':raise ValueError('Invalid common snapshot key')
     store=LocalR2(args.local_store) if args.local_store else R2()
     if args.original_cache:store=CachedOriginals(store,args.original_cache)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=args.output.parent) as directory:
         path=Path(directory)/'snapshot.json'
-        store.get(key,path,checksum,16*1024**2)
-        snapshot=load_capture(path.read_bytes(),job,checksum)
+        with phase('captured snapshot download and validation'):
+            store.get(key,path,checksum,16*1024**2)
+            snapshot=load_capture(path.read_bytes(),job,checksum)
     github=ContentGitHub(os.environ['GITHUB_TOKEN']) if args.publish else None
-    baselines=github.baselines(snapshot['version'],snapshot['sequence']) if github else ()
-    build_captured(snapshot,store,args.output,baselines,conversion_cache=args.conversion_cache,logo_cache=args.logo_cache,airport_map_baselines=getattr(github,'airport_map_baselines',None))
-    print('Verified common Micro + Mini content:',args.output/'content')
-    if github:publish_captured(args.output/'content',snapshot,github,baselines)
+    with phase('published release baseline verification'):
+        baselines=github.baselines(snapshot['version'],snapshot['sequence']) if github else ()
+    with phase('common content build and verification'):
+        build_captured(snapshot,store,args.output,baselines,conversion_cache=args.conversion_cache,logo_cache=args.logo_cache,airport_map_baselines=getattr(github,'airport_map_baselines',None))
+    print('Verified common Micro + Mini + Plus content:',args.output/'content',flush=True)
+    if github:
+        with phase('common content GitHub publication'):
+            publish_captured(args.output/'content',snapshot,github,baselines)
+        print('Common content publication complete',flush=True)
 
 
 if __name__=='__main__':main()
