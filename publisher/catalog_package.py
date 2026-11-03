@@ -9,8 +9,8 @@ import hashlib
 import json
 import re
 import math
-from urllib.parse import urlparse
 import zipfile
+from urllib.parse import urlparse
 
 INDEX_BYTES = 256
 MAX_ROW_BYTES = 8192
@@ -22,7 +22,6 @@ AIRCRAFT_FIELDS = ('icao', 'iata_type', 'manufacturer', 'model', 'aircraft_type'
 RADAR_SYMBOLS = ('airliner_standard', 'airliner_heavy', 'small_aircraft', 'business_jet', 'helicopter', 'glider', 'balloon', 'military')
 # END RADAR CATEGORIES
 CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'government', 'military')
-
 AIRLINE_DETAILS = ('full_name', 'country_code', 'callsign', 'description_de', 'description_en',
                    'wikipedia_url_de', 'wikipedia_url_en', 'sources', 'logo_ref', 'updated_at')
 
@@ -177,6 +176,8 @@ def validate(snapshot):
                 exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') +
                       (('military',) if 'military' in row else ()) + tuple(f for f in AIRLINE_DETAILS if f in row))
                 validate_airline_details(row)
+                if 'icao_ambiguous' in row and type(row['icao_ambiguous']) is not bool:
+                    raise ValueError('Invalid airline ambiguity marker')
                 if 'military' in row and type(row['military']) is not bool:
                     raise ValueError('Invalid military airline classification')
                 key = airline_id(row['id'])
@@ -242,7 +243,7 @@ def validate(snapshot):
     return result
 
 
-def build(snapshot, version, sequence, places=None, airport_logos=None):
+def build(snapshot, version, sequence, places=None, airport_logos=None,airport_map_images=None,airport_map_variant=None):
     if (not isinstance(version, str)
             or not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version)
             or type(sequence) is not int or not 1 <= sequence <= 0xffffffff):
@@ -282,11 +283,14 @@ def build(snapshot, version, sequence, places=None, airport_logos=None):
         manifest['requires']['catalog_reader'] = 2
     if 'airports' in snapshot:
         from airport_catalog import build as build_airports
-        raw = build_airports(snapshot['airports'],airport_logos)
+        raw = build_airports(snapshot['airports'],airport_logos,airport_map_images,airport_map_variant)
         path = prefix + 'airports.bin'
         files[path] = raw
         manifest['airports'] = dict(path=path, bytes=len(raw), sha256=sha(raw))
         manifest['requires']['catalog_reader'] = 3
+        if raw[:4]==b'PSA3':
+            manifest['requires']['catalog_reader']=4
+            manifest['airport_map_variant']=airport_map_variant
     files['catalog/manifest.json'] = encoded(manifest)
     if len(files['catalog/manifest.json']) > 4096:
         raise ValueError('Catalog manifest exceeds device budget')
@@ -334,10 +338,11 @@ def write_stream(files, output, product):
 
 def validate_package(manifest, read):
     """Verify the same bounded catalog accepted by the local firmware reader."""
-    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables') + (('places',) if 'places' in manifest else ()) + (('airports',) if 'airports' in manifest else ()))
+    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables') + (('places',) if 'places' in manifest else ()) + (('airports',) if 'airports' in manifest else ()) + (('airport_map_variant',) if 'airport_map_variant' in manifest else ()))
+    if ('airport_map_variant' in manifest)!=(manifest['requires'].get('catalog_reader')==4) or 'airport_map_variant' in manifest and manifest['airport_map_variant'] not in ('mini','plus'):raise ValueError('Invalid airport map variant compatibility')
     if (manifest['schema'] != 1 or manifest['format'] != 'planeslate-catalog-v1'
             or manifest['products'] != ['micro_360', 'mini_800']
-            or manifest['requires'] != {'catalog_reader': 3 if 'airports' in manifest else 2 if 'places' in manifest else 1}
+            or manifest['requires'] not in ([{'catalog_reader':3},{'catalog_reader':4}] if 'airports' in manifest else [{'catalog_reader':2}] if 'places' in manifest else [{'catalog_reader':1}])
             or set(manifest['tables']) != set(TABLES)):
         raise ValueError('Unsupported catalog manifest or compatibility')
     if not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', manifest['version']):

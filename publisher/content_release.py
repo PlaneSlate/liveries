@@ -115,7 +115,7 @@ def summaries(available, baselines):
     entries=entries[:MAX_BASELINES];validate_summaries(entries,available['version'],available['sequence']);return entries
 
 
-def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=(), airport_logos=None):
+def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=(), airport_logos=None,airport_map_images=None,airport_map_sources=None,airport_map_baselines=None):
     if repository not in ('PlaneSlate/planeslate', 'PlaneSlate/liveries') or set(libraries) != set(PRODUCTS):
         raise ValueError('Invalid common release inputs')
     baselines=tuple(baselines)
@@ -127,16 +127,36 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
     output = Path(output);output.mkdir(parents=True, exist_ok=False)
     catalog = output / ('planeslate-catalog-' + version + '.zip')
     write_package(files, catalog)
+    catalogs={};extra_assets=[]
+    if any(a.get('maps') for a in snapshot.get('airports',[])):
+        for variant in ('mini','plus'):
+            package=output/('planeslate-catalog-'+variant+'-'+version+'.zip')
+            device_files=build_catalog(snapshot,version,sequence,airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_variant=variant)
+            write_package(device_files,package);catalogs[variant]=metadata(package)
+        sources=output/('airport-maps-source-'+version+'.zip')
+        if not airport_map_sources:raise ValueError('Airport map source archive required')
+        with zipfile.ZipFile(sources,'x',zipfile.ZIP_DEFLATED) as archive:
+            for name,raw in sorted(airport_map_sources.items()):
+                if not re.fullmatch('[A-Z0-9]{4}\\.geojson',name):raise ValueError('Invalid airport source name')
+                info=zipfile.ZipInfo(name,(2026,11,3,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;archive.writestr(info,raw)
+            archive.writestr('LICENSE.txt','© OpenStreetMap contributors. Geographic source data: ODbL-1.0. https://www.openstreetmap.org/copyright\n')
+        extra_assets.append(metadata(sources))
     products = []
     for product in PRODUCTS:
         path = output / (product + '-content-' + version + '.psu')
-        result = build_content(libraries[product], catalog, path, product, version, sequence)
+        device_catalog=output/catalogs['mini']['file'] if product=='mini_800' and catalogs else catalog
+        result = build_content(libraries[product], device_catalog, path, product, version, sequence)
         products.append(dict(result, kind='content', file=path.name,
             url='https://github.com/'+repository+'/releases/download/content-'+version+'/'+path.name))
     (output/'content-inventory.json').write_bytes(encoded(inventory)+b'\n')
+    if catalogs:
+        plus=output/('plus_1280-content-'+version+'.psu')
+        build_content(libraries['mini_800'],output/catalogs['plus']['file'],plus,'mini_800',version,sequence)
+        extra_assets.append(metadata(plus))
     feed = dict(schema=1, component='content', channel='stable', version=version, sequence=sequence,
-        requires=dict(content_reader=1, catalog_reader=json.loads(files['catalog/manifest.json'])['requires']['catalog_reader']), products=products,
+        requires=dict(content_reader=1, catalog_reader=4 if catalogs else json.loads(files['catalog/manifest.json'])['requires']['catalog_reader']), products=products,
         changes=changes, first_install=first_install)
+    if catalogs:feed['device_assets']={'plus_1280':dict(metadata(plus),url='https://github.com/'+repository+'/releases/download/content-'+version+'/'+plus.name,airport_variant='plus',format='planeslate-content-v1')}
     raw = encoded(feed)+b'\n'
     if len(raw) > 16384:
         raise ValueError('Common update feed exceeds device budget')
@@ -147,6 +167,17 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
         catalog=metadata(catalog), inventory=metadata(output/'content-inventory.json'),
         feed=metadata(output/'content-updates.json'), products=products,
         release_tag='content-'+version, repository=repository)
+    if catalogs:descriptor['airport_map_catalogs']=catalogs
+    current_maps={a['icao']:sha(encoded(a['maps'])) for a in snapshot.get('airports',[]) if a.get('maps')}
+    if current_maps or airport_map_baselines:
+        previous=airport_map_baselines or {};comparisons={}
+        for baseline,old in previous.items():
+            if not isinstance(old,dict) or any(not re.fullmatch('[A-Z0-9]{4}',k) or not re.fullmatch('[a-f0-9]{64}',v) for k,v in old.items()):raise ValueError('Invalid prior airport map inventory')
+            comparisons[baseline]=dict(new=len(current_maps.keys()-old.keys()),removed=len(old.keys()-current_maps.keys()),changed=sum(current_maps[k]!=old[k] for k in current_maps.keys()&old.keys()),unchanged=sum(current_maps[k]==old[k] for k in current_maps.keys()&old.keys()))
+        maps_inventory=output/'airport-map-inventory.json';maps_inventory.write_bytes(encoded(dict(schema=1,version=version,sequence=sequence,airports=current_maps)))
+        changes_path=output/'airport-map-changes.json';changes_path.write_bytes(encoded(dict(schema=1,version=version,baselines=comparisons)))
+        descriptor['airport_map_inventory']=metadata(maps_inventory);extra_assets.extend([metadata(maps_inventory),metadata(changes_path)])
+    if extra_assets:descriptor['airport_map_assets']=extra_assets
     if any(row.get('radar_shape') for row in snapshot['aircraft']):
         source=Path(__file__).with_name('aircraft-shapes-source.zip')
         if not source.exists():source=Path(__file__).resolve().parents[1]/'deploy/liveries/aircraft-shapes-source.zip'
@@ -251,6 +282,11 @@ def verify(output,baselines=None):
         raise ValueError('Untrusted common release')
     expected={'content-release.json','SHA256SUMS.txt'}
     records=[descriptor['catalog'],descriptor['inventory'],descriptor['feed'],*descriptor['products']]
+    map_catalogs=descriptor.get('airport_map_catalogs',{})
+    if map_catalogs:
+        if set(map_catalogs)!={'mini','plus'}:raise ValueError('Both airport map catalogs required')
+        records.extend(map_catalogs.values())
+    records.extend(descriptor.get('airport_map_assets',[]))
     if 'artwork_source' in descriptor:
         if descriptor['artwork_source'].get('file')!='aircraft-shapes-source.zip':raise ValueError('Invalid artwork source name')
         records.append(descriptor['artwork_source'])
@@ -284,7 +320,7 @@ def verify(output,baselines=None):
     try:
         if catalog.kind!='catalog' or catalog.version!=version or catalog.manifest['sequence']!=sequence:
             raise ValueError('Common catalog identity differs')
-        if feed.get('requires')!={'content_reader':1,**catalog.manifest['requires']}:
+        if feed.get('requires')!={'content_reader':1,'catalog_reader':4 if map_catalogs else catalog.manifest['requires']['catalog_reader']}:
             raise ValueError('Common catalog reader requirement differs')
         snapshot=dict(schema=1,component='catalog',revision=catalog.manifest['revision'],
             assets_revision=catalog.manifest['assets_revision'],assets_sequence=0)
@@ -298,14 +334,21 @@ def verify(output,baselines=None):
             raise ValueError('Captured common revisions differ')
         with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
             libraries={}
-            for record in descriptor['products']:
+            product_records=list(descriptor['products'])
+            if map_catalogs:
+                extra=feed.get('device_assets',{}).get('plus_1280',{})
+                product_records.append(dict(extra,id='plus_1280',kind='content'))
+            for record in product_records:
                 product=record['id'];filename=product+'-content-'+version+'.psu'
+                wire_product='mini_800' if product=='plus_1280' else product
                 if (record['file']!=filename or record['kind']!='content' or record['format']!='planeslate-content-v1'
                         or record['url']!='https://github.com/'+repository+'/releases/download/content-'+version+'/'+filename):
                     raise ValueError('Invalid common product descriptor')
                 with (output/filename).open('rb') as source:
                     raw=source.readline(2050);header=json.loads(raw)
-                    if (len(raw)>2049 or header.get('format')!='planeslate-content-v1' or header.get('product')!=product
+                    expected_variant=('plus' if product=='plus_1280' else 'mini') if map_catalogs and product!='micro_360' else None
+                    if header.get('airport_variant')!=expected_variant:raise ValueError('Wrong display variant in common content header')
+                    if (len(raw)>2049 or header.get('format')!='planeslate-content-v1' or header.get('product')!=wire_product
                             or header.get('version')!=version or header.get('sequence')!=sequence
                             or header.get('requires')!={'content_reader':1} or len(header.get('components',[]))!=2):
                         raise ValueError('Invalid common stream header')
@@ -319,20 +362,32 @@ def verify(output,baselines=None):
                                 if not block:raise ValueError('Truncated common stream')
                                 target.write(block);digest.update(block);left-=len(block)
                         if digest.hexdigest()!=part['sha256']:raise ValueError('Common component checksum mismatch')
-                        package_path=path.with_suffix('.zip');extract_component(path,package_path,kind,product)
+                        package_path=path.with_suffix('.zip');extract_component(path,package_path,kind,wire_product)
                         if kind=='library':libraries[product]=package_path
                         else:
                             parsed=Package(package_path)
+                            expected_catalog=Package(output/map_catalogs['plus' if product=='plus_1280' else 'mini']['file']) if product!='micro_360' and map_catalogs else catalog
                             try:
-                                if parsed.manifest_raw!=catalog.manifest_raw or parsed.files!=catalog.files:
+                                if parsed.manifest_raw!=expected_catalog.manifest_raw or parsed.files!=expected_catalog.files:
                                     raise ValueError('Common products contain different catalogs')
-                            finally:parsed.close()
+                            finally:
+                                parsed.close()
+                                if expected_catalog is not catalog:expected_catalog.close()
                     if source.read(1):raise ValueError('Trailing common stream data')
                 library=Package(libraries[product])
-                try:check_references(library,catalog,product)
+                try:check_references(library,catalog,wire_product)
                 finally:library.close()
             actual=content_inventory(snapshot,image_inventory(libraries),version,sequence)
             if actual!=inventory:raise ValueError('Common counts inventory differs from distributed content')
+            if map_catalogs:
+                for variant,record in map_catalogs.items():
+                    device=Package(output/record['file'])
+                    try:
+                        if device.version!=version or device.manifest['tables']!=catalog.manifest['tables'] or device.manifest['requires']!={'catalog_reader':4}:raise ValueError('Device airport catalog differs from common core')
+                        from airport_catalog import check as check_airports
+                        meta=device.manifest['airports'];rows=check_airports(device.read(meta['path'],128*1024**2))
+                        if any(a.get('maps') and a['maps']['variant']!=variant for a in rows):raise ValueError('Wrong airport map device variant')
+                    finally:device.close()
     finally:catalog.close()
     return descriptor
 

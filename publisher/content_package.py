@@ -71,8 +71,10 @@ def build(library_path, catalog_path, output, product, version, sequence):
         with tempfile.TemporaryDirectory(dir=output.parent) as temp:
             paths = [Path(temp) / 'library.psu', Path(temp) / 'catalog.psu']
             parts = [component_stream(package, product, path) for package, path in zip((library, catalog), paths)]
-            header = line(dict(format='planeslate-content-v1', product=product, version=version,
-                sequence=sequence, requires=dict(content_reader=1), components=parts))
+            descriptor=dict(format='planeslate-content-v1', product=product, version=version,
+                sequence=sequence, requires=dict(content_reader=1), components=parts)
+            if 'airport_map_variant' in catalog.manifest:descriptor['airport_variant']=catalog.manifest['airport_map_variant']
+            header = line(descriptor)
             total = len(header) + sum(part['bytes'] for part in parts)
             if len(header) > 2049 or total > 1024**3:
                 raise ValueError('Content exceeds device stream limits')

@@ -7,7 +7,7 @@ import struct
 
 TYPES = ('large_airport','medium_airport','small_airport','heliport','seaplane_base','balloonport','closed_airport')
 FIELDS = ('id','name','city','country','country_name','icao','iata','latitude','longitude','elevation_m','type','passengers','passengers_year','runways')
-EXTRA_FIELDS = ('ident','gates','scheduled_service','description','description_de','description_en','logo')
+EXTRA_FIELDS = ('ident','gates','scheduled_service','description','description_de','description_en','logo','maps')
 ROW_LIMIT=32768
 RECORD = struct.Struct('<IiiIIBB2x32s8x')
 HEADER = struct.Struct('<4sIII')
@@ -23,6 +23,8 @@ def validate(rows,stored=False):
         if not isinstance(a,dict) or not set(FIELDS)<=set(a) or set(a)-set(FIELDS)-set(EXTRA_FIELDS) or not re.fullmatch(r'oa:[1-9][0-9]{0,8}',a['id']) or a['id'] in ids:
             raise ValueError('Invalid/duplicate airport identity or device fields')
         ids.add(a['id'])
+        from airport_map_assets import validate_maps
+        validate_maps(a.get('maps'),a['icao'],stored)
         for key,limit in (('ident',32),('description',2000),('description_de',2000),('description_en',2000)):
             v=a.get(key,'')
             if not isinstance(v,str) or len(v.encode())>limit or any(ord(c)<32 and c not in '\r\n\t' for c in v):raise ValueError('Invalid airport detail text')
@@ -52,14 +54,32 @@ def validate(rows,stored=False):
                 raise ValueError('Invalid airport facility')
             for key in ('length_m','width_m'):
                 if r[key] is not None and (type(r[key]) not in (int,float) or not math.isfinite(r[key]) or not 0<=r[key]<=20000):raise ValueError('Invalid facility dimensions')
-        if len(encode(a))>ROW_LIMIT:raise ValueError('Airport row exceeds device budget')
+        if len(encode(a))>(ROW_LIMIT if stored or not a.get('maps') else 256*1024):raise ValueError('Airport row exceeds device budget')
     return rows
 
-def build(rows,logos=None):
+def build(rows,logos=None,map_images=None,map_variant=None):
     rows=validate(rows)
     ordered=sorted(rows,key=lambda a:(round(a['latitude']*1e6),a['id']))
     start=HEADER.size+RECORD.size*len(rows)
     index=bytearray();data=bytearray();images=bytearray();metadata={}
+    map_metadata={}
+    for a in ordered:
+        maps=a.get('maps')
+        if not maps or map_variant is None:continue
+        entries=[]
+        for asset in maps['assets']:
+            m=asset['metadata']
+            if m['variant']!=map_variant:continue
+            raw=(map_images or {}).get(asset['sha256'])
+            if hasattr(raw,'read_bytes'):raw=raw.read_bytes()
+            if not isinstance(raw,bytes):raise ValueError('Missing approved airport map PNG')
+            from airport_map_assets import verify_png
+            verify_png(raw,m)
+            image_key='map-'+asset['sha256']
+            if image_key not in metadata:
+                metadata[image_key]=dict(offset=start+len(images));images+=raw
+            entries.append({**{k:v for k,v in m.items() if k not in ('url','key')},**metadata[image_key]})
+        map_metadata[a['id']]=dict(version=maps['version'],variant=map_variant,assets=entries)
     for a in ordered:
         logo=a.get('logo')
         if not logo or logo['sha256'] in metadata:continue
@@ -73,19 +93,20 @@ def build(rows,logos=None):
         images+=raw
         if len(images)>64*1024**2:raise ValueError('Airport logo payload exceeds catalog budget')
     for a in ordered:
-        stored=dict(a)
+        stored=dict(a);stored.pop('maps',None)
+        if a['id'] in map_metadata:stored['maps']=map_metadata[a['id']]
         if a.get('logo'):stored['logo']=metadata[a['logo']['sha256']]
         raw=encode(stored)
         if len(raw)>ROW_LIMIT:raise ValueError('Airport row exceeds device budget')
         index+=RECORD.pack(int(a['id'][3:]),round(a['latitude']*1e6),round(a['longitude']*1e6),start+len(images)+len(data),len(raw),TYPES.index(a['type']),bool(a['iata']),hashlib.sha256(raw).digest())
         data+=raw
     if start+len(images)+len(data)>128*1024**2:raise ValueError('Airport catalog exceeds package budget')
-    return HEADER.pack(b'PSA2' if images else b'PSA1',len(rows),RECORD.size,start)+index+images+data
+    return HEADER.pack(b'PSA3' if map_metadata else b'PSA2' if images else b'PSA1',len(rows),RECORD.size,start)+index+images+data
 
 def check(raw):
     if len(raw)<HEADER.size:raise ValueError('Truncated airport header')
     magic,count,size,start=HEADER.unpack_from(raw)
-    if magic not in (b'PSA1',b'PSA2') or count>150000 or size!=RECORD.size or start!=HEADER.size+count*size or start>len(raw):raise ValueError('Invalid airport index')
+    if magic not in (b'PSA1',b'PSA2',b'PSA3') or count>150000 or size!=RECORD.size or start!=HEADER.size+count*size or start>len(raw):raise ValueError('Invalid airport index')
     first=RECORD.unpack_from(raw,HEADER.size)[3] if count else start
     if first<start or first>len(raw) or (magic==b'PSA1' and first!=start):raise ValueError('Invalid airport data boundary')
     rows=[];offset=first;previous=-90000001;images={}
@@ -98,12 +119,19 @@ def check(raw):
         validate([a],stored=True)
         logo=a.get('logo')
         if logo:
-            if magic!=b'PSA2':raise ValueError('Unexpected airport logo')
+            if magic not in (b'PSA2',b'PSA3'):raise ValueError('Unexpected airport logo')
             lo,length=logo.get('offset'),logo.get('bytes')
             if type(lo) is not int or type(length) is not int or lo<start or length<57 or lo+length>first:raise ValueError('Invalid airport logo range')
             image=raw[lo:lo+length]
             if hashlib.sha256(image).hexdigest()!=logo.get('sha256') or image[:8]!=b'\x89PNG\r\n\x1a\n' or image[12:16]!=b'IHDR' or tuple(struct.unpack_from('>II',image,16))!=(logo.get('width'),logo.get('height')):raise ValueError('Corrupt airport logo')
             images[lo]=length
+        if a.get('maps'):
+            if magic!=b'PSA3':raise ValueError('Unexpected airport map')
+            for meta in a['maps']['assets']:
+                lo,length=meta['offset'],meta['bytes']
+                if lo<start or lo+length>first:raise ValueError('Invalid airport map PNG range')
+                from airport_map_assets import verify_png
+                verify_png(raw[lo:lo+length],meta);images[lo]=length
         if a['id']!='oa:'+str(ident) or round(a['latitude']*1e6)!=lat or round(a['longitude']*1e6)!=lon or TYPES[kind]!=a['type'] or bool(a['iata'])!=bool(iata):raise ValueError('Airport index identity mismatch')
         rows.append(a);previous=lat;offset+=n
     if offset!=len(raw):raise ValueError('Airport trailing bytes')

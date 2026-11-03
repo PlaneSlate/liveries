@@ -80,7 +80,7 @@ class ContentGitHub(GitHub):
         return max((r['sequence'] for _,r in self.published_receipts()),default=0)
 
     def baselines(self,version,sequence):
-        results=[]
+        results=[];self.airport_map_baselines={}
         for release,receipt in self.published_receipts():
             if receipt['sequence']>sequence or (receipt['sequence']==sequence and receipt['version']!=version):
                 raise ValueError('A newer common release is already published')
@@ -92,6 +92,15 @@ class ContentGitHub(GitHub):
             if (record['file']!='content-inventory.json' or record['bytes']!=len(raw) or record['sha256']!=sha(raw)
                     or inventory['version']!=receipt['version'] or inventory['sequence']!=receipt['sequence']):
                 raise ValueError('Baseline inventory differs from published receipt')
+            maps=receipt.get('airport_map_inventory');previous_maps={}
+            if maps:
+                if maps.get('file')!='airport-map-inventory.json':raise ValueError('Invalid prior airport map inventory')
+                raw_maps=read_release_asset(release,maps['file'],64*1024**2)
+                if len(raw_maps)!=maps['bytes'] or sha(raw_maps)!=maps['sha256']:raise ValueError('Airport map baseline checksum mismatch')
+                data=json.loads(raw_maps)
+                if data.get('schema')!=1 or data.get('version')!=inventory['version'] or data.get('sequence')!=inventory['sequence']:raise ValueError('Airport map baseline identity differs')
+                previous_maps=data['airports']
+            self.airport_map_baselines[inventory['version']]=previous_maps
             results.append(inventory)
         return results
 
@@ -211,7 +220,7 @@ def resolve_airport_chunks(snapshot,store):
     snapshot['device_catalog']['airports']=validate_airports(rows)
 
 
-def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,logo_cache=None):
+def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,logo_cache=None,airport_map_baselines=None):
     resolve_airport_chunks(snapshot,store)
     output=Path(output)
     # Completed retries verify the same artifacts. Partial directories fail
@@ -257,8 +266,10 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
         standard_logos=[logo for logo in snapshot.get('logos',[]) if re.fullmatch('[A-Z]{3}',logo.get('icao','')) and logo.get('import_status')=='valid' and logo.get('review_status')=='cleared' and logo.get('review_note')]
         append_logos(libraries['mini_800'],standard_logos,store,output,logo_cache=logo_cache,layouts=('large',))
         append_tails(libraries['mini_800'],snapshot.get('tails',[]),store,output/'tail-originals')
+        from airport_map_assets import collect as collect_airport_maps
+        airport_map_images,airport_map_sources=collect_airport_maps(snapshot['device_catalog'].get('airports',[]),store,output/'airport-map-originals')
         prepare(snapshot['device_catalog'],libraries,output/'content',snapshot['version'],snapshot['sequence'],
-                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
+                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_sources=airport_map_sources,airport_map_baselines=airport_map_baselines,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
     return verify_captured(output/'content',snapshot,baselines)
 
 
@@ -283,7 +294,7 @@ def main():
         snapshot=load_capture(path.read_bytes(),job,checksum)
     github=ContentGitHub(os.environ['GITHUB_TOKEN']) if args.publish else None
     baselines=github.baselines(snapshot['version'],snapshot['sequence']) if github else ()
-    build_captured(snapshot,store,args.output,baselines,conversion_cache=args.conversion_cache,logo_cache=args.logo_cache)
+    build_captured(snapshot,store,args.output,baselines,conversion_cache=args.conversion_cache,logo_cache=args.logo_cache,airport_map_baselines=getattr(github,'airport_map_baselines',None))
     print('Verified common Micro + Mini content:',args.output/'content')
     if github:publish_captured(args.output/'content',snapshot,github,baselines)
 
