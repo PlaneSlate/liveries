@@ -8,6 +8,8 @@ import argparse
 import hashlib
 import json
 import re
+import math
+from urllib.parse import urlparse
 import zipfile
 
 INDEX_BYTES = 256
@@ -24,6 +26,59 @@ CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'go
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), sort_keys=True).encode('utf-8')
+
+
+def validate_aircraft_type_data(data):
+    """Optional public type data only; never publish Admin identities or history."""
+    limits = {'length_m': 200, 'wingspan_m': 200, 'height_m': 100,
+              'typical_seating_min': 1500, 'typical_seating_max': 1500,
+              'range_km': 40000, 'mtow_kg': 2000000}
+    strings = {'range_kind': 20, 'variant_notes': 1000, 'description_de': 2000,
+               'description_en': 2000, 'wikipedia_url': 2048}
+    if not isinstance(data, dict) or set(data) - {*limits, *strings, 'sources', 'wikipedia'} or len(encoded(data)) > 6500:
+        raise ValueError('Invalid or oversized aircraft type data')
+    for key, maximum in limits.items():
+        if key not in data:
+            continue
+        value = data[key]
+        if (type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= maximum
+                or key.startswith('typical_seating_') and type(value) is not int):
+            raise ValueError('Invalid aircraft technical value')
+    if data.get('typical_seating_min', 0) > data.get('typical_seating_max', 1500):
+        raise ValueError('Invalid typical seating interval')
+    for key, limit in strings.items():
+        if key in data:
+            text(data[key], limit)
+    if data.get('range_kind', '') not in ('', 'typical', 'maximum', 'unspecified'):
+        raise ValueError('Invalid range definition')
+    if data.get('wikipedia_url'):
+        url = urlparse(data['wikipedia_url'])
+        if (url.scheme != 'https' or not re.fullmatch(r'[a-z]{2,12}(?:-[a-z]+)?\.wikipedia\.org', url.netloc)
+                or not url.path.startswith('/wiki/') or len(url.path) <= 6 or url.query):
+            raise ValueError('Invalid aircraft Wikipedia link')
+    sources = data.get('sources', {})
+    if not isinstance(sources, dict) or set(sources) - {*limits, *strings}:
+        raise ValueError('Invalid technical field sources')
+    for field, source in sources.items():
+        if not isinstance(source, dict) or set(source) - {'id', 'url', 'version', 'license', 'definition'}:
+            raise ValueError('Invalid technical field source')
+        if source.get('id') not in ('faa', 'openap', 'cado', 'wikipedia'):
+            raise ValueError('Unknown technical field source')
+        for value in source.values():
+            text(value, 2048)
+    wikipedia = data.get('wikipedia', {})
+    if not isinstance(wikipedia, dict) or set(wikipedia) - {'de', 'en'}:
+        raise ValueError('Invalid aircraft Wikipedia attribution')
+    fields = {'language', 'title', 'pageid', 'revid', 'qid', 'section', 'scope', 'url',
+              'revision_url', 'contributors', 'license', 'license_url', 'modification', 'retrieved_at'}
+    for lang, source in wikipedia.items():
+        exact(source, fields)
+        if (source['language'] != lang or source['license'] != 'CC-BY-SA-4.0'
+                or source['scope'] not in ('type', 'variant')
+                or any(type(source[f]) is not int or source[f] < 1 for f in ('pageid', 'revid'))):
+            raise ValueError('Invalid aircraft article revision or attribution')
+        for key in fields - {'pageid', 'revid'}:
+            text(source[key], 2048)
 
 
 def sha(value):
@@ -65,7 +120,9 @@ def validate(snapshot):
         result[table] = {}
         for row in source:
             if table == 'aircraft':
-                exact(row, AIRCRAFT_FIELDS + (('radar_symbol',) if 'radar_symbol' in row else ()) + (('radar_shape',) if 'radar_shape' in row else ()))
+                exact(row, AIRCRAFT_FIELDS + (('radar_symbol',) if 'radar_symbol' in row else ()) + (('radar_shape',) if 'radar_shape' in row else ()) + (('type_data',) if 'type_data' in row else ()))
+                if 'type_data' in row:
+                    validate_aircraft_type_data(row['type_data'])
                 if row.get('radar_symbol', '') not in ('', *RADAR_SYMBOLS):
                     raise ValueError('Invalid radar symbol')
                 shape = row.get('radar_shape')
@@ -74,7 +131,7 @@ def validate(snapshot):
                             any(not isinstance(p,list) or len(p)!=2 or any(type(v) is not int or not -100<=v<=100 for v in p) for p in shape)):
                         raise ValueError('Invalid aircraft radar shape')
                 for field,value in row.items():
-                    if field != 'radar_shape':text(value)
+                    if field not in ('radar_shape', 'type_data'):text(value)
                 key = row['icao']
                 if not re.fullmatch('[A-Z0-9]{2,4}', key):
                     raise ValueError('Invalid aircraft type')

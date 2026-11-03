@@ -138,7 +138,7 @@ def publish_captured(output,snapshot,github,baselines=()):
 def load_capture(raw,job_id,checksum):
     capture=dict(job_id=job_id,snapshot_sha256=checksum)
     validate_capture(capture)
-    if len(raw)>4*1024**2 or sha(raw)!=checksum:
+    if len(raw)>16*1024**2 or sha(raw)!=checksum:
         raise ValueError('Common snapshot checksum or size mismatch')
     snapshot=json.loads(raw)
     validate_snapshot(snapshot,job_id)
@@ -279,7 +279,7 @@ def main():
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=args.output.parent) as directory:
         path=Path(directory)/'snapshot.json'
-        store.get(key,path,checksum,4*1024**2)
+        store.get(key,path,checksum,16*1024**2)
         snapshot=load_capture(path.read_bytes(),job,checksum)
     github=ContentGitHub(os.environ['GITHUB_TOKEN']) if args.publish else None
     baselines=github.baselines(snapshot['version'],snapshot['sequence']) if github else ()
