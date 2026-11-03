@@ -280,9 +280,11 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
             libraries[product['id']]=path
         standard_logos=[logo for logo in snapshot.get('logos',[]) if re.fullmatch('[A-Z]{3}',logo.get('icao','')) and logo.get('import_status')=='valid' and logo.get('review_status')=='cleared' and logo.get('review_note')]
         append_logos(libraries['mini_800'],standard_logos,store,output,logo_cache=logo_cache,layouts=('large',))
-        append_tails(libraries['mini_800'],snapshot.get('tails',[]),store,output/'tail-originals')
+        with phase('captured airline tails'):
+            append_tails(libraries['mini_800'],snapshot.get('tails',[]),store,output/'tail-originals')
         from airport_map_assets import collect as collect_airport_maps
-        airport_map_images,airport_map_sources=collect_airport_maps(snapshot['device_catalog'].get('airports',[]),store,output/'airport-map-originals')
+        with phase('captured airport map images'):
+            airport_map_images,airport_map_sources=collect_airport_maps(snapshot['device_catalog'].get('airports',[]),store,output/'airport-map-originals')
         prepare(snapshot['device_catalog'],libraries,output/'content',snapshot['version'],snapshot['sequence'],
                 baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_sources=airport_map_sources,airport_map_baselines=airport_map_baselines,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
     return verify_captured(output/'content',snapshot,baselines)

@@ -38,7 +38,8 @@ def append_tails(archive_path,tails,store,work):
     rows=[row for row in rows if row.get('type')!='TAIL']
     prefix='library/generations/'+manifest['version']+'/'
     verified={}
-    for tail in sorted(tails,key=lambda row:row['icao']):
+    print('Verifying captured airline tails:',len(tails),flush=True)
+    for number,tail in enumerate(sorted(tails,key=lambda row:row['icao']),1):
         digest=tail['sha256']
         if digest not in verified:
             path=work/(digest+'.png');store.get(tail['key'],path,digest,tail['bytes'])
@@ -57,6 +58,8 @@ def append_tails(archive_path,tails,store,work):
         path=prefix+'tail-'+digest+'.png';contents[path]=data
         rows.append(dict(type='TAIL',airline=tail['icao'],layout='large',asset_type='airline_logo',
                          review_status='cleared',path=path,sha256=digest,bytes=len(data),width=width,height=height))
+        if number%50==0 or number==len(tails):
+            print('Verified captured airline tails:',str(number)+'/'+str(len(tails)),flush=True)
     contents[index]=b''.join((json.dumps(row,separators=(',',':'))+'\n').encode() for row in sorted(rows,key=lambda row:(row['type'],row['airline'],row['layout'],row.get('source_filename',''))))
     manifest['index'].update(bytes=len(contents[index]),entries=len(rows),sha256=hashlib.sha256(contents[index]).hexdigest())
     # This marker also makes deletion authoritative: never revive a legacy USB tail.

@@ -69,24 +69,26 @@ class Package:
         prefix = f'{self.kind}/generations/{self.version}/'
         required = {}
 
-        def asset(path, meta, dimensions=None):
+        def asset(path, meta, dimensions=None, *, image_limit=512*1024, max_pixels=1024*1024):
             if not isinstance(path, str) or not path.startswith(prefix) or path not in self.members:
                 raise ValueError('Referenzierte Datei fehlt im Paket.')
             size, digest = meta.get('bytes'), meta.get('sha256')
             if type(size) is not int or size < 1 or not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
                 raise ValueError('Ungueltige Datei-Pruefsumme.')
+            if dimensions is not None and self.members[path].file_size > image_limit:
+                raise ValueError(f'Bilddatei ist zu gross: {path}')
             if path in required:
                 if required[path] != (size, digest, dimensions):
                     raise ValueError('Widerspruechliche Dateiangaben.')
                 return
-            data = self.read(path, 64*1024**2 if dimensions is None else 512*1024)
+            data = self.read(path, 64*1024**2 if dimensions is None else image_limit)
             if len(data) != size or sha(data) != digest:
                 raise ValueError(f'Pruefsumme stimmt nicht: {path}')
             if dimensions is not None:
                 if not path.endswith('.png'):
                     raise ValueError('PNG-Datei erwartet.')
                 with Image.open(io.BytesIO(data)) as image:
-                    if image.format != 'PNG' or image.size != dimensions or image.width*image.height > 1024*1024:
+                    if image.format != 'PNG' or image.size != dimensions or image.width*image.height > max_pixels:
                         raise ValueError('Ungueltige Bildgroesse.')
                     if self.kind == 'library' and image.mode not in ('RGB', 'RGBA'):
                         raise ValueError('Livery muss als RGB/RGBA vorliegen.')
@@ -122,9 +124,14 @@ class Package:
                     raise ValueError('Ungueltiger oder doppelter Livery-Eintrag.')
                 keys.add(identity)
                 dims = (e['width'], e['height'])
-                if any(type(n) is not int or n < 1 or n > 1024 for n in dims):
+                # Captured tails use the same bounded originals already supported
+                # by the device library reader and PNG decoder. Other artwork
+                # retains the existing package limits.
+                tail = asset_type == 'airline_logo' and e['type'] == 'TAIL'
+                if any(type(n) is not int or n < 1 or n > (2048 if tail else 1024) for n in dims):
                     raise ValueError('Ungueltige Bildabmessungen.')
-                asset(e['path'], e, dims)
+                asset(e['path'], e, dims, image_limit=4*1024**2 if tail else 512*1024,
+                      max_pixels=2048**2 if tail else 1024**2)
         elif self.kind == 'catalog':
             # Share the package schema with the dependency-free release builder.
             import sys
