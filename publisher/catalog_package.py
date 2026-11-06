@@ -40,7 +40,7 @@ def validate_airline_details(row):
         if value:
             url = urlparse(value)
             if (url.scheme != 'https' or url.netloc != language + '.wikipedia.org'
-                    or not url.path.startswith('/wiki/') or len(url.path) <= 6 or url.query or url.fragment):
+                    or not url.path.startswith('/wiki/') or len(url.path) <= 6 or url.query):
                 raise ValueError('Invalid Wikipedia article URL')
     sources = row.get('sources', {})
     if not isinstance(sources, dict) or set(sources) - {'de', 'en'}:
@@ -48,9 +48,30 @@ def validate_airline_details(row):
     required = {'provider', 'language', 'qid', 'article_id', 'title', 'article_url', 'revision_id',
                 'revision_url', 'retrieved_at', 'license', 'license_url', 'attribution', 'history_url',
                 'adaptation', 'translated'}
+    research_fields = {'provider', 'language', 'article_url', 'retrieved_at', 'attribution', 'adaptation', 'references'}
     for language, source in sources.items():
-        exact(source, required)
-        for field in required - {'article_id', 'revision_id', 'translated'}:
+        if isinstance(source, dict) and source.get('provider') == 'PlaneSlate research':
+            exact(source, research_fields)
+            if source['language'] != language:
+                raise ValueError('Invalid airline research language')
+            for field in research_fields - {'references'}:
+                text(source[field], 2048)
+                if not source[field]:
+                    raise ValueError('Missing airline research metadata')
+            references = source['references']
+            if not isinstance(references, list) or not 1 <= len(references) <= 16:
+                raise ValueError('Invalid airline research references')
+            for value in [source['article_url'], *references]:
+                text(value, 2048)
+                url = urlparse(value)
+                if url.scheme not in ('https', 'http') or not url.hostname or url.username or url.password:
+                    raise ValueError('Invalid airline research reference URL')
+            continue
+        # Some independently enriched records retain complete Wikipedia
+        # attribution with the article title represented by its article URL.
+        fields = required if set(source) == required else required - {'title', 'history_url'}
+        exact(source, fields)
+        for field in fields - {'article_id', 'revision_id', 'translated'}:
             text(source[field])
             if not source[field]:
                 raise ValueError('Missing airline source metadata')
@@ -202,7 +223,7 @@ def validate(snapshot):
                 if not re.fullmatch('[A-Z0-9]{2,4}', key):
                     raise ValueError('Invalid aircraft type')
             elif table == 'airlines':
-                exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') +
+                exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') + (('icao_ambiguous',) if 'icao_ambiguous' in row else ()) +
                       (('military',) if 'military' in row else ()) + tuple(f for f in AIRLINE_DETAILS if f in row))
                 validate_airline_details(row)
                 if 'icao_ambiguous' in row and type(row['icao_ambiguous']) is not bool:
