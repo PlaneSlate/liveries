@@ -99,16 +99,45 @@ def validate_aircraft_type_data(data):
     for field, source in sources.items():
         if not isinstance(source, dict) or set(source) - {'id', 'url', 'version', 'license', 'definition'}:
             raise ValueError('Invalid technical field source')
-        if source.get('id') not in ('faa', 'openap', 'cado', 'wikipedia'):
+        if source.get('id') not in ('faa', 'openap', 'cado', 'wikipedia', 'easa', 'manufacturer', 'eurocontrol'):
             raise ValueError('Unknown technical field source')
         for value in source.values():
             text(value, 2048)
+        if source.get('id') in ('easa', 'manufacturer', 'eurocontrol'):
+            url = urlparse(source.get('url', ''))
+            host = url.hostname or ''
+            if (url.scheme != 'https' or not host or url.username or url.password or url.port
+                    or source['id'] == 'easa' and not (host == 'easa.europa.eu' or host.endswith('.easa.europa.eu'))
+                    or source['id'] == 'eurocontrol' and not (host == 'eurocontrol.int' or host.endswith('.eurocontrol.int'))):
+                raise ValueError('Invalid technical research source URL')
     wikipedia = data.get('wikipedia', {})
     if not isinstance(wikipedia, dict) or set(wikipedia) - {'de', 'en'}:
         raise ValueError('Invalid aircraft Wikipedia attribution')
     fields = {'language', 'title', 'pageid', 'revid', 'qid', 'section', 'scope', 'url',
               'revision_url', 'contributors', 'license', 'license_url', 'modification', 'retrieved_at'}
+    citation_fields = {'language', 'title', 'pageid', 'revid', 'scope', 'url', 'retrieved_at'}
     for lang, source in wikipedia.items():
+        # Independent researched summaries retain article/revision citations,
+        # rather than claiming to be imported/licensed Wikipedia excerpts.
+        if isinstance(source, dict) and set(source) == citation_fields:
+            exact(source, citation_fields)
+            if (source['language'] != lang or source['scope'] != 'type_or_family'
+                    or any(type(source[f]) is not int or source[f] < 1 for f in ('pageid', 'revid'))):
+                raise ValueError('Invalid aircraft research citation')
+            for key in citation_fields - {'pageid', 'revid'}:
+                text(source[key], 2048)
+            url = urlparse(source['url'])
+            if (url.scheme != 'https' or url.netloc != lang + '.wikipedia.org'
+                    or not url.path.startswith('/wiki/') or len(url.path) <= 6 or url.query
+                    or not source['title'] or not source['retrieved_at']):
+                raise ValueError('Invalid aircraft research article URL')
+            field = 'description_' + lang
+            # The independently written German summary may cite English
+            # research or manufacturer documentation; this is an article
+            # association, not an assertion that its text is an excerpt.
+            if not data.get(field) or not sources.get(field):
+                raise ValueError('Aircraft research citation needs a description and research source')
+            continue
         exact(source, fields)
         if (source['language'] != lang or source['license'] != 'CC-BY-SA-4.0'
                 or source['scope'] not in ('type', 'variant')
