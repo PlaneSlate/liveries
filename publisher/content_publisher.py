@@ -191,6 +191,12 @@ def verify_captured(output,snapshot,baselines=()):
     return receipt
 
 
+APPROVED_GENERIC_LIVERIES = {
+    'B744': 'B747-400_unknown.png',
+    'B752': 'B757-200_unknown.png',
+}
+
+
 def image_alias_choices(snapshot):
     """Resolve spelling aliases only when the captured catalog has one exact name."""
     from copy import deepcopy
@@ -205,6 +211,23 @@ def image_alias_choices(snapshot):
     normalize=lambda name:name.replace('_',' ').casefold()
     for (type_code,airline),names in groups.items():
         if len(names)<2 or (type_code,airline) in explicit:continue
+        if airline == '*':
+            # Generic defaults are distinct from airline paints and registration
+            # overrides. Honor the owner's explicit selections first, otherwise
+            # require the exact type name from the captured Aircraft Catalog.
+            approved = APPROVED_GENERIC_LIVERIES.get(type_code)
+            if approved:
+                if names.count(approved) != 1:
+                    raise ValueError('Approved generic livery missing for ' + type_code)
+                selected = approved
+            else:
+                canonical = catalog['ink_types'].get(type_code, '') + '_unknown.png'
+                matches = [name for name in names if name.casefold() == canonical.casefold()]
+                if len(matches) != 1:
+                    continue
+                selected = matches[0]
+            catalog.setdefault('choices', []).append({'type':type_code,'airline':airline,'selected':selected})
+            continue
         canonical=catalog['ink_types'].get(type_code,'')+'_'+catalog['ink_airlines'].get(airline,'')+'.png'
         if names.count(canonical)==1 and all(normalize(name)==normalize(canonical) for name in names):
             catalog.setdefault('choices',[]).append({'type':type_code,'airline':airline,'selected':canonical})
