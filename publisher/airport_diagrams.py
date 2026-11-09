@@ -11,7 +11,7 @@ from airport_maps import bounds_of, coordinate, encoded, physical_width, points,
 
 
 MAX_DOCUMENT = 10 * 1024**2
-MAX_IMAGE_PIXELS = 24_000_000
+MAX_IMAGE_PIXELS = 36_000_000
 MAX_PAGES = 50
 MAX_CANDIDATES = 180
 KINDS = ('runway', 'taxiway', 'apron', 'terminal', 'building', 'hangar')
@@ -45,9 +45,9 @@ def read_diagram(raw, format, page):
             if (format not in ('png', 'jpeg') or source.format != format.upper()
                     or source.width * source.height > MAX_IMAGE_PIXELS or page != 1
                     or getattr(source, 'n_frames', 1) != 1):
-                raise ValueError('Select a single PNG or JPEG of at most 24 megapixels')
+                raise ValueError('Select a single PNG or JPEG of at most 36 megapixels')
+            source.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
             rgba = ImageOps.exif_transpose(source).convert('RGBA')
-            rgba.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
             image = Image.new('RGB', rgba.size, 'white')
             image.paste(rgba, mask=rgba.getchannel('A'))
         page_count, vectors = 1, []

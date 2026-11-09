@@ -17,7 +17,7 @@ def put(store,key,data,content='application/json'):
  with urllib.request.urlopen(request,timeout=90) as response:
   if response.status not in (200,201):raise ValueError('Airport map storage failed')
 def run(store,job,work,save):
- if set(job)-{'schema','id','mode','airport','identity','version','options','source','created_at','reference'} or job.get('schema')!=1 or job.get('mode') not in ('fetch','render','analyze'):raise ValueError('Invalid map job')
+ if set(job)-{'schema','id','mode','airport','identity','version','options','source','created_at','reference'} or job.get('schema')!=1 or job.get('mode') not in ('fetch','render','analyze','build'):raise ValueError('Invalid map job')
  airport=job['airport'];icao=airport['icao'];id=job['id']
  if not re.fullmatch('[A-Z0-9]{4}',icao) or not re.fullmatch('[a-f0-9-]{36}',id):raise ValueError('Invalid map job identity')
  prefix='airport-maps/jobs/'+id+'/'
@@ -26,13 +26,19 @@ def run(store,job,work,save):
  progress=lambda message:save(prefix+'progress.json',encoded(dict(message=message)),'application/json')
  options=job.get('options',{})
  if set(options)-{'bounds','padding','density','optional','osm_id','viewport','master','design','layers','runway_labels','include_reference'}:raise ValueError('Invalid map options')
- if job['mode']=='fetch':
+ source=job.get('source') or {};geo=None
+ if job['mode'] in ('fetch','build'):
   progress('Retrieving airport perimeter and OSM infrastructure')
-  raw,geo=fetch_geometry(airport,bbox=options.get('bounds'),osm_id=options.get('osm_id'))
-  source=asset(encoded(raw),'.json');geometry=asset(encoded(geo),'.geojson')
-  return dict(schema=1,id=id,mode='fetch',identity=job['identity'],source=source,geometry=geometry,counts=geo['counts'],warnings=geo['warnings'],bounds=geo['bounds'],retrieved_at=geo['retrieved_at'],source_timestamp=geo['source_timestamp'],lookup=dict(bounds=options.get('bounds'),osm_id=options.get('osm_id')))
- source=job.get('source') or {};ref=source.get('geometry');geo=None
- if ref:
+  bounds=options.get('bounds')
+  raw,geo=fetch_geometry(airport,bbox=bounds,osm_id=options.get('osm_id'))
+  if job['mode']=='build' and not geo['counts'].get('runway'):
+   raise ValueError('No runway geometry found in the OSM airport extent')
+  raw_source=asset(encoded(raw),'.json');geometry=asset(encoded(geo),'.geojson')
+  fetched_source=dict(schema=1,id=id,mode='fetch',identity=job['identity'],source=raw_source,geometry=geometry,counts=geo['counts'],warnings=geo['warnings'],bounds=geo['bounds'],retrieved_at=geo['retrieved_at'],source_timestamp=geo['source_timestamp'],lookup=dict(bounds=bounds,osm_id=options.get('osm_id')))
+  if job['mode']=='fetch':return fetched_source
+  source=fetched_source
+ ref=source.get('geometry')
+ if ref and geo is None:
   if not re.fullmatch(r'airport-maps/jobs/[a-f0-9-]{36}/[a-f0-9]{64}\.geojson',ref['key']) or not 0<ref['bytes']<=24*1024**2:raise ValueError('Invalid geometry reference')
   path=work/'geometry.geojson';store.get(ref['key'],path,ref['sha256'],ref['bytes']);geo=json.loads(path.read_bytes())
   if geo['airport_icao']!=icao:raise ValueError('Source airport mismatch')
@@ -71,7 +77,7 @@ def run(store,job,work,save):
    png,meta=render(geo,variant,style,size=size,padding=options.get('padding',.08),density=options.get('density','none'),optional=options.get('optional',True),bbox=options.get('bounds'),version=job['version'],design=options.get('design','diagram'),layers=options.get('layers'),runway_labels=options.get('runway_labels',False))
    assets.append(dict(**asset(png,'.png'),metadata=meta))
  warnings=list(dict.fromkeys(warning for ref in assets for warning in ref['metadata']['warnings']))
- return dict(schema=1,id=id,mode='render',identity=job['identity'],version=job['version'],assets=assets,source=source,options=options,counts=geo['counts'],warnings=warnings,bounds=geo['bounds'],generated_at=datetime.now(timezone.utc).isoformat(),reference_token=reference_token,combined_source=combined_source)
+ return dict(schema=1,id=id,mode=job['mode'],identity=job['identity'],version=job['version'],assets=assets,source=source,options=options,counts=geo['counts'],warnings=warnings,bounds=geo['bounds'],generated_at=datetime.now(timezone.utc).isoformat(),reference_token=reference_token,combined_source=combined_source)
 def main():
  id=os.environ['JOB_ID'];checksum=os.environ['SNAPSHOT_SHA256'];key=os.environ['SNAPSHOT_KEY']
  if not re.fullmatch('[a-f0-9-]{36}',id) or key!='airport-maps/jobs/'+id+'/input.json':raise ValueError('Invalid job input')
