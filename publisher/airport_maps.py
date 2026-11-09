@@ -1,6 +1,6 @@
 """OSM airport diagrams. Central generation only; devices consume PNG + EPSG:3857 metadata.
 
-No geometric repair, buffering or synthetic airport infrastructure is performed.
+Source geometry is preserved. Only the drawing expands centerlines to a visible width.
 OSM ways are joined only at identical node IDs in multipolygon relations.
 """
 import argparse
@@ -25,6 +25,15 @@ VARIANTS={'thumbnail':(480,320),'mini':(800,800),'plus':(1280,720)}
 PALETTES={
  'dark':dict(background='#061d25',boundary='#25464b',runway='#263338',edge='#d3e1e3',taxiway='#48858e',apron='#304d58',terminal='#9db8c5',building='#536e7b',gate='#72c6db',text='#c7dbe1'),
  'light':dict(background='#edf2f0',boundary='#c0cecd',runway='#495557',edge='#182c32',taxiway='#52808c',apron='#c4d2d5',terminal='#fafcfb',building='#a7b9c0',gate='#257889',text='#17333f')}
+
+DIAGRAM_PALETTES={
+ 'light':dict(background='#F3F6F6',runway='#304C5A',taxiway='#C2D1D4',apron='#E0E6E7',terminal='#718994',building='#A7B4BB',text='#304C5A'),
+ 'dark':dict(background='#142831',runway='#C8DBE0',taxiway='#647F89',apron='#2C424D',terminal='#90A9B3',building='#526A76',text='#C8DBE0'),
+}
+DIAGRAM_ORDER=('apron','building','hangar','terminal','taxiway','runway')
+# Estimated drawing widths in metres, used only when a centerline has no usable width.
+DIAGRAM_WIDTHS={'taxiway':18,'runway':30}
+DIAGRAM_MIN_PIXELS={'taxiway':2.0,'runway':3.0}
 
 def encoded(value):return (json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False)+'\n').encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
@@ -222,7 +231,47 @@ def transform(bounds,width,height,padding=0.08,circular=False):
 def pixel(lon,lat,meta):
  x,y=project(lon,lat);b=meta['rendering_bounds']
  return (x-b['min_x'])/(b['max_x']-b['min_x'])*meta['width'],(b['max_y']-y)/(b['max_y']-b['min_y'])*meta['height']
-def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='none',optional=True,bbox=None,version=1):
+def physical_width(feature):
+ value=str(feature['properties'].get('width','')).strip()
+ match=re.fullmatch(r'(\d+(?:\.\d+)?)\s*(m|ft|\x27)?',value)
+ if not match:return None
+ width=float(match[1])*(.3048 if match[2] in ('ft',"'") else 1)
+ return width if .5<=width<=200 else None
+
+def diagram_viewport(features,bounds,width,height,padding,circular,manual):
+ extents=[]
+ for feature in features:
+  kind=feature['properties']['feature'];geometry=feature['geometry']
+  width_m=(physical_width(feature) or DIAGRAM_WIDTHS[kind]) if geometry['type']=='LineString' and kind in DIAGRAM_WIDTHS else 0
+  for lon,lat in points(geometry):
+   x,y=project(lon,lat)
+   extents.append((x,y,width_m/(2*math.cos(math.radians(lat)))))
+ if manual or not extents:
+  left,bottom=project(bounds['min_lon'],bounds['min_lat']);right,top=project(bounds['max_lon'],bounds['max_lat'])
+  extents.extend((x,y,0) for x in (left,right) for y in (bottom,top))
+ left=min(x-r for x,y,r in extents);right=max(x+r for x,y,r in extents)
+ bottom=min(y-r for x,y,r in extents);top=max(y+r for x,y,r in extents)
+ cx,cy=(left+right)/2,(bottom+top)/2
+ available_x=width*(.5-padding)-DIAGRAM_MIN_PIXELS['runway']
+ available_y=height*(.5-padding)-DIAGRAM_MIN_PIXELS['runway']
+ scale=min(available_x/max(5,right-cx),available_y/max(5,top-cy))
+ if circular:
+  radius=max(math.hypot(x-cx,y-cy)+r for x,y,r in extents)
+  scale=min(scale,min(available_x,available_y)/max(5,radius))
+ return dict(min_x=cx-width/(2*scale),min_y=cy-height/(2*scale),max_x=cx+width/(2*scale),max_y=cy+height/(2*scale))
+
+def draw_diagram_polygon(image,color,exterior,holes):
+ # A hole affects only its own feature. Overlapping pavement is drawn as a union.
+ left=max(0,math.floor(min(x for x,y in exterior)));top=max(0,math.floor(min(y for x,y in exterior)))
+ right=min(image.width,math.ceil(max(x for x,y in exterior))+1);bottom=min(image.height,math.ceil(max(y for x,y in exterior))+1)
+ if left>=right or top>=bottom:return
+ mask=Image.new('L',(right-left,bottom-top));pen=ImageDraw.Draw(mask)
+ local=lambda ring:[(x-left,y-top) for x,y in ring]
+ pen.polygon(local(exterior),fill=255)
+ for hole in holes:pen.polygon(local(hole),fill=0)
+ image.paste(color,(left,top,right,bottom),mask)
+
+def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='none',optional=True,bbox=None,version=1,design='diagram',layers=None,runway_labels=False):
  if style not in PALETTES or variant not in (*VARIANTS,'master'):raise ValueError('Invalid map style/variant')
  if density not in ('none','essential','normal','detailed'):raise ValueError('Invalid label density')
  width,height=size or (VARIANTS.get(variant) or (2048,2048));bounds=validate_bounds(bbox or geo['bounds'])
@@ -230,7 +279,19 @@ def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='none
  b=geo['bounds']
  if bounds['min_lon']>b['min_lon'] or bounds['min_lat']>b['min_lat'] or bounds['max_lon']<b['max_lon'] or bounds['max_lat']<b['max_lat']:raise ValueError('Extent clips source geometry; fetch the adjusted extent first')
  meta=dict(schema=1,airport_icao=geo['airport_icao'],style='planeslate_'+style,variant=variant,width=width,height=height,projection='EPSG:3857',rotation_deg=0,bounds=bounds,rendering_bounds=transform(bounds,width,height,padding,variant=='mini'),asset_version=version,generated_at=now(),source=geo['source'],source_timestamp=geo['source_timestamp'],retrieved_at=geo['retrieved_at'],attribution=ATTRIBUTION,license='ODbL-1.0',license_url=LICENSE,counts=geo['counts'],warnings=geo['warnings'])
- pal=PALETTES[style];image=Image.new('RGB',(width,height),pal['background']);draw=ImageDraw.Draw(image);labels=[];runway_labels={}
+ if design not in ('diagram','legacy'):raise ValueError('Invalid map design')
+ diagram=design=='diagram';features=geo['features'];layer_options=layers or {}
+ if diagram:
+  layer_key={'building':'buildings','hangar':'buildings','terminal':'buildings','apron':'aprons','taxiway':'taxiways'}
+  features=[f for f in features if f['properties']['feature'] in DIAGRAM_ORDER and f['geometry']['type']!='Point'
+            and layer_options.get(layer_key.get(f['properties']['feature']),True)]
+  meta['rendering_bounds']=diagram_viewport(features,bounds,width,height,padding,variant=='mini',bbox is not None)
+ pal=DIAGRAM_PALETTES[style] if diagram else PALETTES[style]
+ aa=2 if diagram else 1
+ image=Image.new('RGB',(width*aa,height*aa),pal['background']);draw=ImageDraw.Draw(image);labels=[];label_ends={}
+ def screen(p):
+  x,y=pixel(*p,meta)
+  return x*aa,y*aa
  font_path=Path(__file__).resolve().parents[1]/'assets/fonts/Jost-Variable.ttf'
  fonts=[str(Path(__file__).with_name('Jost-Variable.ttf')),str(font_path),'C:/Windows/Fonts/segoeui.ttf','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
  def font(size):
@@ -239,43 +300,58 @@ def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='none
    except OSError:pass
   return ImageFont.load_default(size=size)
  fnt=font(max(10,round(width/90)));big=font(max(12,round(width/65)))
- order=['aerodrome','service','apron','building','hangar','terminal','taxiway','runway','parking_position','gate','helipad']
- for f in sorted(geo['features'],key=lambda f:order.index(f['properties']['feature'])):
+ order=DIAGRAM_ORDER if diagram else ['aerodrome','service','apron','building','hangar','terminal','taxiway','runway','parking_position','gate','helipad']
+ estimated=Counter()
+ for f in sorted(features,key=lambda f:order.index(f['properties']['feature'])):
   p=f['properties'];k=p['feature'];g=f['geometry'];c=g['coordinates']
-  if not optional and k in ('service','building','hangar','helipad','gate','parking_position'):continue
-  color=pal.get(k,pal['building']);edge=pal['edge'] if k=='runway' else pal['boundary'];geo_points=points(g)
-  pts=[pixel(*p,meta) for p in geo_points]
+  if not diagram and not optional and k in ('service','building','hangar','helipad','gate','parking_position'):continue
+  color=pal.get(k,pal['building']);geo_points=points(g)
+  pts=[screen(p) for p in geo_points]
   if g['type'] in ('Polygon','MultiPolygon'):
    polygons=[c] if g['type']=='Polygon' else c
    for poly in polygons:
-    exterior=[pixel(*q,meta) for q in poly[0]]
+    exterior=[screen(q) for q in poly[0]]
+    if diagram:
+     draw_diagram_polygon(image,color,exterior,[[screen(q) for q in hole] for hole in poly[1:]])
+     continue
     if k=='aerodrome':draw.line(exterior,fill=color,width=1,joint='curve');continue
     mask=Image.new('L',(width,height));pen=ImageDraw.Draw(mask);pen.polygon(exterior,fill=255)
     for hole in poly[1:]:pen.polygon([pixel(*q,meta) for q in hole],fill=0)
-    image.paste(color,(0,0),mask);draw.line(exterior,fill=edge,width=1,joint='curve')
+    image.paste(color,(0,0),mask);draw.line(exterior,fill=pal['edge'] if k=='runway' else pal['boundary'],width=1,joint='curve')
   elif g['type']=='LineString':
    line_width=2 if k=='taxiway' else 1
-   if k=='runway':
+   if diagram and k in DIAGRAM_WIDTHS:
+    w=physical_width(f)
+    if w is None:estimated[k]+=1;w=DIAGRAM_WIDTHS[k]
+    scale=width/(meta['rendering_bounds']['max_x']-meta['rendering_bounds']['min_x'])
+    line_width=round(aa*max(DIAGRAM_MIN_PIXELS[k],w*scale/math.cos(math.radians(geo_points[0][1]))))
+   elif not diagram and k=='runway':
     # Use only recorded physical width; a missing width stays a diagram line.
     w=str(p.get('width','')).removesuffix(' m')
     if re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',w) and 0<float(w)<200:
      scale=width/(meta['rendering_bounds']['max_x']-meta['rendering_bounds']['min_x']);line_width=max(2,round(float(w)/math.cos(math.radians(geo_points[0][1]))*scale))
     draw.line(pts,fill=pal['edge'],width=line_width+2,joint='curve')
    draw.line(pts,fill=color,width=line_width,joint='curve')
+   if diagram and k=='taxiway':
+    radius=line_width/2
+    for x,y in pts:draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill=color)
   elif k in ('gate','parking_position','helipad'):
    x,y=pts[0];draw.ellipse((x-2,y-2,x+2,y+2),fill=pal['gate'])
   label=(p.get('name') or p.get('ref')) if k=='terminal' else p.get('ref') or p.get('name')
   priority={'runway':0,'terminal':1,'taxiway':2,'gate':3,'parking_position':4}.get(k,9)
-  if density!='none' and label and priority<5 and (priority<2 or variant!='thumbnail' and density!='essential' and (priority<3 or density=='detailed')):
+  show_label=(runway_labels and k=='runway') if diagram else (density!='none' and priority<5 and (priority<2 or variant!='thumbnail' and density!='essential' and (priority<3 or density=='detailed')))
+  if show_label and label:
+   pts=[(x/aa,y/aa) for x,y in pts]
    x,y=pts[len(pts)//2] if g['type']=='LineString' else (sum(v[0] for v in pts)/len(pts),sum(v[1] for v in pts)/len(pts))
    # Runway references are sourced, never inferred from an angle. A two-end ref
    # is split only when its supplied directions agree with the measured axis.
    ends=re.fullmatch(r'(\d{2}[LCR]?)/(\d{2}[LCR]?)',str(label)) if k=='runway' and g['type']=='LineString' else None
-   if ends:runway_labels.setdefault(str(label),[]).extend((pts[0],pts[-1]))
+   if ends:label_ends.setdefault(str(label),[]).extend((pts[0],pts[-1]))
    else:labels.append((priority,str(label)[:80],x,y))
  # Multiple OSM ways can describe one physical runway. Place labels at its
  # extreme sourced endpoints, without drawing a connection between the ways.
- for reference,endpoints in runway_labels.items():
+ if aa>1:image=image.resize((width,height),Image.Resampling.LANCZOS);draw=ImageDraw.Draw(image)
+ for reference,endpoints in label_ends.items():
   a,b=max(((a,b) for a in endpoints for b in endpoints),key=lambda pair:math.dist(*pair));heading=math.degrees(math.atan2(b[0]-a[0],a[1]-b[1]))%360
   pair=reference.split('/');delta=abs((heading-int(pair[0][:2])*10+180)%360-180)
   if delta<30 or delta>150:
@@ -298,6 +374,9 @@ def render(geo,variant='plus',style='dark',*,size=None,padding=.08,density='none
  draw.text((width/2,height-(42 if variant=='mini' else 17)),caption,font=font(10 if width<800 else 12),fill=pal['text'],anchor='mt')
  meta['runways']=[dict(ref=f['properties'].get('ref',''),points=[list(pixel(*p,meta)) for p in f['geometry']['coordinates']]) for f in geo['features'] if f['properties']['feature']=='runway' and f['geometry']['type']=='LineString' and len(f['geometry']['coordinates'])<=512]
  raw=io.BytesIO();image.save(raw,format='PNG',optimize=True);data=raw.getvalue();meta.update(bytes=len(data),sha256=sha(data),labels=len(placed))
+ if diagram:
+  meta['estimated_widths']=dict(estimated)
+  meta['warnings']=[*meta['warnings'],*(f'{count} {kind} centerline(s): estimated {DIAGRAM_WIDTHS[kind]} m drawing width' for kind,count in sorted(estimated.items()))]
  return data,meta
 
 def main():

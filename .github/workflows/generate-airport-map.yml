@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - run: python -m pip install -r publisher/requirements.txt
+      - run: python -m pip install -r publisher/requirements.txt -r publisher/airport-diagram-requirements.txt
       - name: Retrieve or render airport geometry
         env:
           JOB_ID: ${{ inputs.job_id }}
