@@ -24,6 +24,7 @@ RADAR_SYMBOLS = ('airliner_standard', 'airliner_heavy', 'small_aircraft', 'busin
 CATEGORIES = ('special_livery', 'historic', 'research', 'rare', 'corporate', 'government', 'military')
 AIRLINE_DETAILS = ('full_name', 'country_code', 'callsign', 'description_de', 'description_en',
                    'wikipedia_url_de', 'wikipedia_url_en', 'sources', 'logo_ref', 'updated_at')
+AIRLINE_SPECIAL_TEXT = {'display_name': 120, 'short_name': 40, 'description': 1200, 'short_description': 160}
 
 
 def validate_airline_details(row):
@@ -224,12 +225,19 @@ def validate(snapshot):
                     raise ValueError('Invalid aircraft type')
             elif table == 'airlines':
                 exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') + (('icao_ambiguous',) if 'icao_ambiguous' in row else ()) +
-                      (('military',) if 'military' in row else ()) + tuple(f for f in AIRLINE_DETAILS if f in row))
+                      tuple(f for f in ('military', 'corporate', 'special_text', *AIRLINE_DETAILS) if f in row))
                 validate_airline_details(row)
                 if 'icao_ambiguous' in row and type(row['icao_ambiguous']) is not bool:
                     raise ValueError('Invalid airline ambiguity marker')
-                if 'military' in row and type(row['military']) is not bool:
-                    raise ValueError('Invalid military airline classification')
+                for category in ('military', 'corporate'):
+                    if category in row and type(row[category]) is not bool:
+                        raise ValueError(f'Invalid {category} airline classification')
+                if 'special_text' in row:
+                    special_text = row['special_text']
+                    if not isinstance(special_text, dict) or set(special_text) - AIRLINE_SPECIAL_TEXT.keys():
+                        raise ValueError('Invalid airline Special Aircraft text')
+                    for field, value in special_text.items():
+                        text(value, AIRLINE_SPECIAL_TEXT[field])
                 key = airline_id(row['id'])
                 if (not row['airline_name'] or not re.fullmatch('[A-Z]{3}|', row['icao'])
                         or not re.fullmatch('[A-Z0-9]{2}|', row['iata'])):
