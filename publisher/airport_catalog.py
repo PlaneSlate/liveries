@@ -7,7 +7,7 @@ import struct
 
 TYPES = ('large_airport','medium_airport','small_airport','heliport','seaplane_base','balloonport','closed_airport')
 FIELDS = ('id','name','city','country','country_name','icao','iata','latitude','longitude','elevation_m','type','passengers','passengers_year','runways')
-EXTRA_FIELDS = ('ident','gates','scheduled_service','description','description_de','description_en','logo','maps')
+EXTRA_FIELDS = ('ident','gates','scheduled_service','description','description_de','description_en','website','wikipedia_url','logo','maps')
 ROW_LIMIT=32768
 RECORD = struct.Struct('<IiiIIBB2x32s8x')
 HEADER = struct.Struct('<4sIII')
@@ -20,14 +20,24 @@ def validate(rows,stored=False):
         raise ValueError('Invalid airport catalog')
     ids=set()
     for a in rows:
-        if not isinstance(a,dict) or not set(FIELDS)<=set(a) or set(a)-set(FIELDS)-set(EXTRA_FIELDS) or not re.fullmatch(r'oa:[1-9][0-9]{0,8}',a['id']) or a['id'] in ids:
-            raise ValueError('Invalid/duplicate airport identity or device fields')
-        ids.add(a['id'])
+        if not isinstance(a,dict):
+            raise ValueError('Invalid airport row')
+        airport_id=a.get('id')
+        if not isinstance(airport_id,str) or not re.fullmatch(r'oa:[1-9][0-9]{0,8}',airport_id) or airport_id in ids:
+            raise ValueError(f'Invalid or duplicate airport ID: {airport_id!r}')
+        missing=set(FIELDS)-a.keys()
+        unknown=a.keys()-set(FIELDS)-set(EXTRA_FIELDS)
+        if missing or unknown:
+            raise ValueError(f'Invalid device fields for {airport_id}: missing={sorted(missing)}, unknown={sorted(unknown)}')
+        ids.add(airport_id)
         from airport_map_assets import validate_maps
         validate_maps(a.get('maps'),a['icao'],stored)
         for key,limit in (('ident',32),('description',2000),('description_de',2000),('description_en',2000)):
             v=a.get(key,'')
             if not isinstance(v,str) or len(v.encode())>limit or any(ord(c)<32 and c not in '\r\n\t' for c in v):raise ValueError('Invalid airport detail text')
+        for key in ('website','wikipedia_url'):
+            v=a.get(key,'')
+            if not isinstance(v,str) or len(v.encode())>2048 or any(ord(c)<32 for c in v):raise ValueError('Invalid airport link')
         if a.get('gates') is not None and (type(a['gates']) is not int or not 0<=a['gates']<=100000):raise ValueError('Invalid gate count')
         if a.get('scheduled_service') is not None and type(a['scheduled_service']) is not bool:raise ValueError('Invalid scheduled service')
         logo=a.get('logo')
@@ -80,6 +90,7 @@ def build(rows,logos=None,map_images=None,map_variant=None):
                 metadata[image_key]=dict(offset=start+len(images));images+=raw
             entries.append({**{k:v for k,v in m.items() if k not in ('url','key')},**metadata[image_key]})
         map_metadata[a['id']]=dict(version=maps['version'],variant=map_variant,assets=entries)
+        if maps.get('kind')=='overlay':map_metadata[a['id']].update(kind='overlay',provenance=maps['provenance'])
     for a in ordered:
         logo=a.get('logo')
         if not logo or logo['sha256'] in metadata:continue
