@@ -17,12 +17,67 @@ import zipfile
 from publisher import (build_snapshot, validate_snapshot, CachedOriginals, LocalR2,
                        R2, digest, GitHub, phase)
 from catalog_package import encoded, sha, validate
-from content_release import prepare, verify, validate_capture, PRODUCTS
+from content_release import build_sd_download, prepare, verify, validate_capture, PRODUCTS, SD_PRODUCTS
 from content_changes import validate_inventory
 from tail_assets import append_tails,validate_tails
 from logo_assets import append_logos
 
 REPOSITORY='PlaneSlate/liveries'
+
+
+def publish_sd_downloads(output, version, github):
+    """Publish card-reader archives separately from the device update receipt."""
+    tag = 'sd-card-' + version
+    body = ('PlaneSlate Liveries & Catalogs for microSD card readers. '
+            'Includes separate ZIPs for Micro (1.85″), Mini and Plus.\n\n'
+            'See [step 3 of the Web Installer](https://planeslate.com/installer/#sd-card-downloads) '
+            'for instructions.')
+    release = github.request('GET', '/releases/tags/' + tag)
+    if release is None:
+        release = next((item for item in github.request('GET', '/releases?per_page=100')
+                        if item['draft'] and item['tag_name'] == tag), None)
+    if release is None:
+        release = github.request('POST', '/releases', dict(tag_name=tag,
+            name='PlaneSlate microSD card packs ' + version, body=body,
+            draft=True, prerelease=False, make_latest='false'))
+    if release.get('body') != body or release.get('prerelease') is not False:
+        raise ValueError('Unexpected SD card release identity')
+
+    with tempfile.TemporaryDirectory(dir=Path(output).parent) as temp:
+        folder = Path(temp)
+        for product, variant in zip(SD_PRODUCTS, (None, 'mini', 'plus')):
+            name = f'{product}-sd-card-{version}.zip'
+            build_sd_download(Path(output) / f'{product}-content-{version}.psu',
+                product, folder / name, variant=variant)
+        checksums = {path.name: digest(path) for path in sorted(folder.iterdir())}
+        sums = folder / 'SHA256SUMS.txt'
+        sums.write_bytes(''.join(f'{value}  {name}\n' for name, value in checksums.items()).encode())
+        checksums[sums.name] = digest(sums)
+
+        def checked_assets(current, complete=False):
+            assets = {asset['name']: asset for asset in current['assets']}
+            if (len(assets) != len(current['assets']) or not assets.keys() <= checksums.keys()
+                    or (complete and assets.keys() != checksums.keys())):
+                raise ValueError('Unexpected SD card release assets')
+            for name, asset in assets.items():
+                if (asset['state'] != 'uploaded' or asset['digest'] != 'sha256:' + checksums[name]
+                        or asset['size'] != (folder / name).stat().st_size):
+                    raise ValueError('SD card release asset differs: ' + name)
+            return assets
+
+        present = checked_assets(release, not release['draft'])
+        for name in checksums.keys() - present.keys():
+            print('Uploading SD card asset:', name, flush=True)
+            github.upload(release['id'], folder / name)
+        path = '/releases/' + str(release['id'])
+        checked = github.request('GET', path)
+        checked_assets(checked, True)
+        if checked['draft']:
+            checked = github.request('PATCH', path, dict(draft=False, make_latest='false'))
+        if checked.get('draft') is not False:
+            raise ValueError('SD card release is still a draft')
+        checked_assets(checked, True)
+        return checked
 
 
 def read_release_asset(release,name,limit):
@@ -341,6 +396,8 @@ def main():
         build_captured(snapshot,store,args.output,baselines,conversion_cache=args.conversion_cache,logo_cache=args.logo_cache,airport_map_baselines=getattr(github,'airport_map_baselines',None))
     print('Verified common Micro + Mini + Plus content:',args.output/'content',flush=True)
     if github:
+        with phase('microSD card GitHub publication'):
+            publish_sd_downloads(args.output/'content',snapshot['version'],github)
         with phase('common content GitHub publication'):
             publish_captured(args.output/'content',snapshot,github,baselines)
         print('Common content publication complete',flush=True)

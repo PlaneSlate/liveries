@@ -19,6 +19,78 @@ from content_changes import content_inventory, content_changes, validate_invento
 from content_package import Package, PRODUCTS, build as build_content, check_references
 
 MAX_BASELINES = 16
+SD_PRODUCTS = (*PRODUCTS, 'plus_1280')
+
+
+def sd_activation(version, sequence, manifests):
+    payload = encoded(dict(schema=1, version=version, sequence=sequence, components={
+        kind: dict(base=sha(raw), manifest=raw.decode('utf-8'))
+        for kind, raw in manifests.items()
+    }))
+    if len(payload) > 16384:
+        raise ValueError('SD activation exceeds device limit')
+    header = f'PS2\n1\n{len(payload)}\n'.encode()
+    return header + sha(header + payload).encode() + b'\n' + payload
+
+
+def sd_sources(library, catalog):
+    return {name: (pack, digest) for pack in (library, catalog)
+            for name, _, digest in pack.files}
+
+
+def write_sd_card(library, catalog, output, version, sequence):
+    manifests = {pack.kind: pack.manifest_raw for pack in (library, catalog)}
+    activation = sd_activation(version, sequence, manifests)
+    with zipfile.ZipFile(output, 'x', zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        for name, (pack, _) in sd_sources(library, catalog).items():
+            with pack.archive.open(name) as source, archive.open(name, 'w') as target:
+                shutil.copyfileobj(source, target)
+        for kind, raw in manifests.items():
+            archive.writestr(zipfile.ZipInfo(f'{kind}/manifest.json'), raw)
+        for slot in ('a', 'b'):
+            archive.writestr(zipfile.ZipInfo(f'usb-content.{slot}'), activation)
+
+
+def verify_sd_card(path, library, catalog, version, sequence):
+    manifests = {pack.kind: pack.manifest_raw for pack in (library, catalog)}
+    activation = sd_activation(version, sequence, manifests)
+    records = {f'{kind}/manifest.json': sha(raw) for kind, raw in manifests.items()}
+    records.update({f'usb-content.{slot}': sha(activation) for slot in ('a', 'b')})
+    records.update({name: digest for name, (_, digest) in sd_sources(library, catalog).items()})
+    with zipfile.ZipFile(path) as archive:
+        if sorted(archive.namelist()) != sorted(records):
+            raise ValueError('Incorrect SD card archive file list')
+        for name, digest in records.items():
+            with archive.open(name) as stream:
+                if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
+                    raise ValueError('SD card archive differs from USB package: ' + name)
+
+
+def build_sd_download(source, product, output, *, variant=None):
+    # Use the same content and validation as the USB installer.
+    from sd_manager import ContentPackage
+
+    if product not in SD_PRODUCTS:
+        raise ValueError('Unsupported SD download product')
+    package = ContentPackage(source)
+    try:
+        if package.product != ('micro_360' if product == 'micro_360' else 'mini_800'):
+            raise ValueError('SD download product does not match the source')
+        if package.header.get('airport_variant') != variant:
+            raise ValueError('SD download airport maps do not match the source')
+        folder = Path(package.temporary.name)
+        library = Package(folder / 'library.zip')
+        try:
+            catalog = Package(folder / 'catalog.zip')
+            try:
+                write_sd_card(library, catalog, output, package.version, package.sequence)
+                verify_sd_card(output, library, catalog, package.version, package.sequence)
+            finally:
+                catalog.close()
+        finally:
+            library.close()
+    finally:
+        package.close()
 
 
 def validate_summaries(entries,version,sequence):
@@ -133,6 +205,7 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
             package=output/('planeslate-catalog-'+variant+'-'+version+'.zip')
             device_files=build_catalog(snapshot,version,sequence,airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_variant=variant)
             write_package(device_files,package);catalogs[variant]=metadata(package)
+    if any(a.get('maps') and a['maps'].get('kind')!='overlay' for a in snapshot.get('airports',[])):
         sources=output/('airport-maps-source-'+version+'.zip')
         if not airport_map_sources:raise ValueError('Airport map source archive required')
         with zipfile.ZipFile(sources,'x',zipfile.ZIP_DEFLATED) as archive:
