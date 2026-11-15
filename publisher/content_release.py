@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import zipfile
 
-from catalog_package import build as build_catalog, encoded, sha, validate, write_package
+from catalog_package import ALLIANCE_ROW_PREFIX, build as build_catalog, encoded, sha, validate, write_package
 from content_changes import content_inventory, content_changes, validate_inventory
 from content_package import Package, PRODUCTS, build as build_content, check_references
 
@@ -187,12 +187,12 @@ def summaries(available, baselines):
     entries=entries[:MAX_BASELINES];validate_summaries(entries,available['version'],available['sequence']);return entries
 
 
-def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=(), airport_logos=None,airport_map_images=None,airport_map_sources=None,airport_map_baselines=None):
+def prepare(snapshot, libraries, output, version, sequence, baselines=(), repository='PlaneSlate/planeslate', *, capture=None, radar_sources=(), airport_logos=None,airport_map_images=None,airport_map_sources=None,airport_map_baselines=None,alliance_logos=None):
     if repository not in ('PlaneSlate/planeslate', 'PlaneSlate/liveries') or set(libraries) != set(PRODUCTS):
         raise ValueError('Invalid common release inputs')
     baselines=tuple(baselines)
     validate(snapshot)
-    files = build_catalog(snapshot, version, sequence,airport_logos=airport_logos)
+    files = build_catalog(snapshot,version,sequence,airport_logos=airport_logos,alliance_logos=alliance_logos)
     inventory = content_inventory(snapshot, image_inventory(libraries), version, sequence)
     changes = summaries(inventory, baselines)
     first_install = content_changes(None, inventory)['changes']
@@ -203,7 +203,7 @@ def prepare(snapshot, libraries, output, version, sequence, baselines=(), reposi
     if any(a.get('maps') for a in snapshot.get('airports',[])):
         for variant in ('mini','plus'):
             package=output/('planeslate-catalog-'+variant+'-'+version+'.zip')
-            device_files=build_catalog(snapshot,version,sequence,airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_variant=variant)
+            device_files=build_catalog(snapshot,version,sequence,airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_variant=variant,alliance_logos=alliance_logos)
             write_package(device_files,package);catalogs[variant]=metadata(package)
     if any(a.get('maps') and a['maps'].get('kind')!='overlay' for a in snapshot.get('airports',[])):
         sources=output/('airport-maps-source-'+version+'.zip')
@@ -407,6 +407,8 @@ def verify(output,baselines=None):
         for table in ('aircraft','airlines','aliases','registrations'):
             meta=catalog.manifest['tables'][table]['data']
             rows=[json.loads(raw) for raw in catalog.read(meta['path'],64*1024**2).splitlines()]
+            if table=='airlines' and 'alliances' in catalog.manifest:
+                rows=[row for row in rows if not row['key'].startswith(ALLIANCE_ROW_PREFIX)]
             if table in ('aircraft','airlines'):
                 for row in rows:row.pop('key')
             snapshot[table]=rows
@@ -463,7 +465,10 @@ def verify(output,baselines=None):
                 for variant,record in map_catalogs.items():
                     device=Package(output/record['file'])
                     try:
-                        if device.version!=version or device.manifest['tables']!=catalog.manifest['tables'] or device.manifest['requires']!={'catalog_reader':4}:raise ValueError('Device airport catalog differs from common core')
+                        if (device.version!=version or device.manifest['tables']!=catalog.manifest['tables']
+                                or device.manifest.get('alliances')!=catalog.manifest.get('alliances')
+                                or device.manifest['requires']!={'catalog_reader':4}):
+                            raise ValueError('Device airport catalog differs from common core')
                         from airport_catalog import check as check_airports
                         meta=device.manifest['airports'];rows=check_airports(device.read(meta['path'],128*1024**2))
                         if any(a.get('maps') and a['maps']['variant']!=variant for a in rows):raise ValueError('Wrong airport map device variant')

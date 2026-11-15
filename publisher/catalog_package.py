@@ -5,6 +5,7 @@ The existing SD transfer remains responsible for verified activation.
 """
 from pathlib import Path
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -15,6 +16,10 @@ from urllib.parse import urlparse
 INDEX_BYTES = 256
 MAX_ROW_BYTES = 8192
 TABLES = ('aircraft', 'airlines', 'aliases', 'registrations')
+ALLIANCE_FIELDS = ('id', 'name', 'description_de', 'description_en', 'wikipedia_de', 'wikipedia_en', 'logo')
+ALLIANCE_FILE_LIMIT = 4 * 1024**2
+ALLIANCE_CHUNK_CHARS = 3000
+ALLIANCE_ROW_PREFIX = 'named:__planeslate_alliances_'
 AIRCRAFT_FIELDS = ('icao', 'iata_type', 'manufacturer', 'model', 'aircraft_type',
                    'engine_type', 'engine_count', 'wake_turbulence_category',
                    'planeslate_name', 'livery_name')
@@ -190,8 +195,64 @@ def airline_id(value):
     return value
 
 
+def validate_alliances(records, memberships, airlines, *, packed=False):
+    if not isinstance(records, list) or not isinstance(memberships, list) or len(records)>256 or len(memberships)>len(airlines):
+        raise ValueError('Invalid alliance catalog')
+    ids, members = set(), set()
+    for alliance in records:
+        exact(alliance, ALLIANCE_FIELDS)
+        identity = alliance['id']
+        if not isinstance(identity, str) or not re.fullmatch('[a-z0-9][a-z0-9-]{0,47}', identity) or identity in ids:
+            raise ValueError('Invalid or duplicate alliance ID')
+        ids.add(identity)
+        text(alliance['name'], 100)
+        if not alliance['name']:
+            raise ValueError('Alliance name is required')
+        for language in ('de', 'en'):
+            text(alliance['description_'+language], 2400)
+            url = alliance['wikipedia_'+language]
+            text(url, 400)
+            if url:
+                parsed = urlparse(url)
+                if (parsed.scheme != 'https' or parsed.netloc != language+'.wikipedia.org' or parsed.query
+                        or not parsed.path.startswith('/wiki/') or len(parsed.path)<=6):
+                    raise ValueError('Invalid alliance Wikipedia link')
+        logo = alliance['logo']
+        if logo is None:
+            continue
+        if packed:
+            if not isinstance(logo,str) or len(logo)>120000:
+                raise ValueError('Invalid alliance logo')
+            if not base64.b64decode(logo,validate=True).startswith(b'\x89PNG\r\n\x1a\n'):
+                raise ValueError('Invalid alliance logo PNG')
+        else:
+            exact(logo, ('key','sha256','bytes','width','height'))
+            digest = logo['sha256']
+            if (not isinstance(digest,str) or not re.fullmatch('[a-f0-9]{64}',digest)
+                    or not isinstance(logo['key'],str) or not logo['key'].endswith('/'+digest+'.png')
+                    or any(type(logo[field]) is not int or not 1<=logo[field]<=maximum
+                           for field,maximum in [('bytes',1024**2),('width',2048),('height',2048)])):
+                raise ValueError('Invalid alliance logo reference')
+    for member in memberships:
+        exact(member, ('airline_id','alliance_id') + (('name','icao') if packed and 'name' in member else ()))
+        airline, alliance = member['airline_id'], member['alliance_id']
+        if not isinstance(airline,str) or not isinstance(alliance,str) or airline not in airlines or alliance not in ids or airline in members:
+            raise ValueError('Invalid, duplicate or unresolved alliance membership')
+        if 'name' in member:
+            text(member['name'],120)
+            if not member['name'] or not re.fullmatch('[A-Z]{3}|',member['icao']):
+                raise ValueError('Invalid alliance member display fields')
+            if isinstance(airlines,dict):
+                row = airlines[airline]
+                if (member['name'],member['icao']) != (row['airline_name'],row['icao']):
+                    raise ValueError('Alliance member metadata differs from airline catalog')
+        members.add(airline)
+
+
 def validate(snapshot):
-    exact(snapshot, ('schema', 'component', 'revision', 'assets_revision', 'assets_sequence', *TABLES) + (('airports',) if 'airports' in snapshot else ()))
+    exact(snapshot, ('schema', 'component', 'revision', 'assets_revision', 'assets_sequence', *TABLES)
+          + (('airports',) if 'airports' in snapshot else ())
+          + tuple(field for field in ('alliances','alliance_memberships') if field in snapshot))
     if 'airports' in snapshot:
         from airport_catalog import validate as validate_airports
         validate_airports(snapshot['airports'])
@@ -298,15 +359,43 @@ def validate(snapshot):
         if ((row['airline'] and row['airline'] not in result['airlines'])
                 or (row['type'] and row['type'] not in result['aircraft'])):
             raise ValueError('Registration refers to missing catalog identity')
+    if ('alliances' in snapshot) != ('alliance_memberships' in snapshot):
+        raise ValueError('Incomplete alliance catalog')
+    if 'alliances' in snapshot:
+        validate_alliances(snapshot['alliances'],snapshot['alliance_memberships'],result['airlines'])
     return result
 
 
-def build(snapshot, version, sequence, places=None, airport_logos=None,airport_map_images=None,airport_map_variant=None):
+def build(snapshot, version, sequence, places=None, airport_logos=None,airport_map_images=None,airport_map_variant=None,alliance_logos=None):
     if (not isinstance(version, str)
             or not re.fullmatch(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9_-])?', version)
             or type(sequence) is not int or not 1 <= sequence <= 0xffffffff):
         raise ValueError('Invalid catalog version or sequence')
     tables = validate(snapshot)
+    alliance_meta = None
+    if snapshot.get('alliances'):
+        airlines = tables['airlines']
+        records = []
+        for row in snapshot['alliances']:
+            logo = row['logo']
+            if logo and (not alliance_logos or logo['sha256'] not in alliance_logos):
+                raise ValueError('Captured alliance logo is missing')
+            records.append(dict(row, logo=base64.b64encode(alliance_logos[logo['sha256']]).decode('ascii') if logo else None))
+        memberships = [dict(row, name=airlines[row['airline_id']]['airline_name'],
+                            icao=airlines[row['airline_id']]['icao']) for row in snapshot['alliance_memberships']]
+        validate_alliances(records, memberships, airlines, packed=True)
+        raw = json.dumps(dict(schema=1, records=records, memberships=memberships),
+                         ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
+        if len(raw) > ALLIANCE_FILE_LIMIT:
+            raise ValueError('Alliance catalog exceeds device budget')
+        # Extension rows use the existing index and leave ICAO/IATA empty, so
+        # earlier readers still install the same files and resolve real airlines.
+        if any(key.startswith(ALLIANCE_ROW_PREFIX) for key in airlines):
+            raise ValueError('Reserved catalog airline ID')
+        for number, offset in enumerate(range(0, len(raw), ALLIANCE_CHUNK_CHARS)):
+            key = f'{ALLIANCE_ROW_PREFIX}{number:04d}'
+            airlines[key] = dict(key=key, alliance_chunk=raw[offset:offset+ALLIANCE_CHUNK_CHARS].decode('ascii'))
+        alliance_meta = dict(bytes=len(raw), sha256=sha(raw))
     prefix = f'catalog/generations/{version}/'
     files, descriptors = {}, {}
     for name, rows in tables.items():
@@ -349,6 +438,8 @@ def build(snapshot, version, sequence, places=None, airport_logos=None,airport_m
         if raw[:4]==b'PSA3':
             manifest['requires']['catalog_reader']=4
             manifest['airport_map_variant']=airport_map_variant
+    if alliance_meta:
+        manifest['alliances'] = alliance_meta
     files['catalog/manifest.json'] = encoded(manifest)
     if len(files['catalog/manifest.json']) > 4096:
         raise ValueError('Catalog manifest exceeds device budget')
@@ -396,7 +487,8 @@ def write_stream(files, output, product):
 
 def validate_package(manifest, read):
     """Verify the same bounded catalog accepted by the local firmware reader."""
-    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables') + (('places',) if 'places' in manifest else ()) + (('airports',) if 'airports' in manifest else ()) + (('airport_map_variant',) if 'airport_map_variant' in manifest else ()))
+    exact(manifest, ('schema', 'format', 'version', 'sequence', 'revision', 'assets_revision', 'products', 'requires', 'tables')
+          + tuple(field for field in ('places','airports','airport_map_variant','alliances') if field in manifest))
     if ('airport_map_variant' in manifest)!=(manifest['requires'].get('catalog_reader')==4) or 'airport_map_variant' in manifest and manifest['airport_map_variant'] not in ('mini','plus'):raise ValueError('Invalid airport map variant compatibility')
     if (manifest['schema'] != 1 or manifest['format'] != 'planeslate-catalog-v1'
             or manifest['products'] != ['micro_360', 'mini_800']
@@ -444,6 +536,7 @@ def validate_package(manifest, read):
                 or len(encoded(row))>2048 for row in cities)):
             raise ValueError('Invalid offline place row')
         required[meta['path']] = (meta['bytes'], meta['sha256'], None)
+    alliance_chunks = []
     for name in TABLES:
         table = manifest['tables'][name]
         exact(table, ('entries', 'record_bytes', 'max_row_bytes', 'index', 'data'))
@@ -480,14 +573,39 @@ def validate_package(manifest, read):
             row = json.loads(raw)
             if row['key'] != entry['key']:
                 raise ValueError('Catalog index identity mismatch')
-            if name in ('aircraft', 'airlines'):
-                row.pop('key')
-            rows[name].append(row)
+            if name == 'airlines' and entry['key'].startswith(ALLIANCE_ROW_PREFIX):
+                exact(row, ('key', 'alliance_chunk'))
+                chunk = row['alliance_chunk']
+                if (entry['key'] != f'{ALLIANCE_ROW_PREFIX}{len(alliance_chunks):04d}' or not isinstance(chunk, str)
+                        or not chunk.isascii() or not 0 < len(chunk) <= ALLIANCE_CHUNK_CHARS
+                        or alliance_chunks and len(alliance_chunks[-1]) != ALLIANCE_CHUNK_CHARS):
+                    raise ValueError('Invalid alliance extension row')
+                alliance_chunks.append(chunk)
+            else:
+                if name in ('aircraft', 'airlines'):
+                    row.pop('key')
+                rows[name].append(row)
             previous, offset = entry['key'], offset + entry['bytes']
         if offset != len(content['data']):
             raise ValueError('Unindexed catalog data')
     validate(dict(schema=1, component='catalog', revision=manifest['revision'],
                   assets_revision=manifest['assets_revision'], assets_sequence=0, **rows))
+    if 'alliances' in manifest:
+        meta = manifest['alliances']
+        exact(meta, ('bytes','sha256'))
+        if (type(meta['bytes']) is not int or not 1<=meta['bytes']<=ALLIANCE_FILE_LIMIT or not isinstance(meta['sha256'],str)
+                or not re.fullmatch('[a-f0-9]{64}',meta['sha256'])):
+            raise ValueError('Invalid alliance catalog reference')
+        raw = ''.join(alliance_chunks).encode('ascii')
+        if len(raw)!=meta['bytes'] or sha(raw)!=meta['sha256']:
+            raise ValueError('Alliance catalog checksum mismatch')
+        payload = json.loads(raw)
+        exact(payload, ('schema','records','memberships'))
+        if payload['schema'] != 1:
+            raise ValueError('Invalid alliance catalog schema')
+        validate_alliances(payload['records'],payload['memberships'],{a['id']:a for a in rows['airlines']},packed=True)
+    elif alliance_chunks:
+        raise ValueError('Missing alliance catalog metadata')
     return required
 
 

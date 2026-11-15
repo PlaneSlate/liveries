@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+from io import BytesIO
 import re
 import tempfile
 import urllib.parse
@@ -317,6 +318,24 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
     if output.exists():
         return verify_captured(output/'content',snapshot,baselines)
     output.mkdir(parents=True)
+    alliance_logos={}
+    for alliance in snapshot['device_catalog'].get('alliances',[]):
+        logo=alliance['logo']
+        if not logo or logo['sha256'] in alliance_logos:
+            continue
+        from PIL import Image
+        folder=output/'alliance-originals'
+        folder.mkdir(exist_ok=True)
+        path=folder/(logo['sha256']+'.png')
+        store.get(logo['key'],path,logo['sha256'],1024**2)
+        with Image.open(path) as source:
+            if source.format!='PNG' or source.size!=(logo['width'],logo['height']):
+                raise ValueError('Captured alliance logo dimensions differ')
+            image=source.convert('RGBA')
+            image.thumbnail((128,96),Image.Resampling.LANCZOS)
+            image_file=BytesIO()
+            image.save(image_file,format='PNG')
+            alliance_logos[logo['sha256']]=image_file.getvalue()
     airport_logos={};airport_logo_bytes=0
     print('Loading captured airport logos:',len({a['logo']['sha256'] for a in snapshot['device_catalog'].get('airports',[]) if a.get('logo')}),flush=True)
     for airport in snapshot['device_catalog'].get('airports',[]):
@@ -364,7 +383,7 @@ def build_captured(snapshot,store,output,baselines=(),*,conversion_cache=None,lo
         with phase('captured airport map images'):
             airport_map_images,airport_map_sources=collect_airport_maps(snapshot['device_catalog'].get('airports',[]),store,output/'airport-map-originals')
         prepare(snapshot['device_catalog'],libraries,output/'content',snapshot['version'],snapshot['sequence'],
-                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_sources=airport_map_sources,airport_map_baselines=airport_map_baselines,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
+                baselines,'PlaneSlate/liveries',radar_sources=snapshot.get('radar_sources',[]),airport_logos=airport_logos,airport_map_images=airport_map_images,airport_map_sources=airport_map_sources,airport_map_baselines=airport_map_baselines,alliance_logos=alliance_logos,capture=dict(job_id=snapshot['job_id'],snapshot_sha256=snapshot['_snapshot_sha256']))
     return verify_captured(output/'content',snapshot,baselines)
 
 
