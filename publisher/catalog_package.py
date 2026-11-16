@@ -196,15 +196,18 @@ def airline_id(value):
 
 
 def validate_alliances(records, memberships, airlines, *, packed=False):
-    if not isinstance(records, list) or not isinstance(memberships, list) or len(records)>256 or len(memberships)>len(airlines):
+    if not isinstance(records, list) or not isinstance(memberships, list) or len(records)>256 or len(memberships)>2*len(airlines):
         raise ValueError('Invalid alliance catalog')
-    ids, members = set(), set()
+    ids, members = {}, set()
     for alliance in records:
-        exact(alliance, ALLIANCE_FIELDS)
+        exact(alliance, ALLIANCE_FIELDS + (('alliance_type',) if 'alliance_type' in alliance else ()))
         identity = alliance['id']
         if not isinstance(identity, str) or not re.fullmatch('[a-z0-9][a-z0-9-]{0,47}', identity) or identity in ids:
             raise ValueError('Invalid or duplicate alliance ID')
-        ids.add(identity)
+        role = alliance.get('alliance_type','passenger')
+        if role not in ('passenger','cargo'):
+            raise ValueError('Invalid alliance type')
+        ids[identity] = role
         text(alliance['name'], 100)
         if not alliance['name']:
             raise ValueError('Alliance name is required')
@@ -234,10 +237,14 @@ def validate_alliances(records, memberships, airlines, *, packed=False):
                            for field,maximum in [('bytes',1024**2),('width',2048),('height',2048)])):
                 raise ValueError('Invalid alliance logo reference')
     for member in memberships:
-        exact(member, ('airline_id','alliance_id') + (('name','icao') if packed and 'name' in member else ()))
+        exact(member, ('airline_id','alliance_id') + (('name','icao') if packed and 'name' in member else ())
+              + (('alliance_type',) if 'alliance_type' in member else ()))
         airline, alliance = member['airline_id'], member['alliance_id']
-        if not isinstance(airline,str) or not isinstance(alliance,str) or airline not in airlines or alliance not in ids or airline in members:
+        if not isinstance(airline,str) or not isinstance(alliance,str) or airline not in airlines or alliance not in ids:
             raise ValueError('Invalid, duplicate or unresolved alliance membership')
+        role = member.get('alliance_type','passenger')
+        if role != ids[alliance] or (airline,role) in members:
+            raise ValueError('Invalid or duplicate alliance type assignment')
         if 'name' in member:
             text(member['name'],120)
             if not member['name'] or not re.fullmatch('[A-Z]{3}|',member['icao']):
@@ -246,7 +253,7 @@ def validate_alliances(records, memberships, airlines, *, packed=False):
                 row = airlines[airline]
                 if (member['name'],member['icao']) != (row['airline_name'],row['icao']):
                     raise ValueError('Alliance member metadata differs from airline catalog')
-        members.add(airline)
+        members.add((airline,role))
 
 
 def validate(snapshot):
@@ -268,8 +275,11 @@ def validate(snapshot):
             raise ValueError('Invalid catalog table')
         result[table] = {}
         for row in source:
+            role_field = ('service_role',) if isinstance(row,dict) and 'service_role' in row else ()
+            if role_field and row['service_role'] not in ('unknown','passenger','cargo'):
+                raise ValueError('Invalid aircraft service role')
             if table == 'aircraft':
-                exact(row, AIRCRAFT_FIELDS + (('radar_symbol',) if 'radar_symbol' in row else ()) + (('radar_shape',) if 'radar_shape' in row else ()) + (('type_data',) if 'type_data' in row else ()))
+                exact(row, AIRCRAFT_FIELDS + role_field + tuple(field for field in ('radar_symbol','radar_shape','type_data') if field in row))
                 if 'type_data' in row:
                     validate_aircraft_type_data(row['type_data'])
                 if row.get('radar_symbol', '') not in ('', *RADAR_SYMBOLS):
@@ -316,7 +326,7 @@ def validate(snapshot):
                 for value in row['ids']:
                     airline_id(value)
             else:
-                exact(row, ('key', 'registration', 'type', 'airline', 'operator', 'livery', 'special'))
+                exact(row, ('key', 'registration', 'type', 'airline', 'operator', 'livery', 'special') + role_field)
                 key = text(row['key'], 16)
                 registration = text(row['registration'], 20)
                 if (not re.fullmatch(r'(?:[A-Z0-9]{2,16}|[0-9]{2}\+[0-9]{2})', key)
@@ -384,7 +394,13 @@ def build(snapshot, version, sequence, places=None, airport_logos=None,airport_m
         memberships = [dict(row, name=airlines[row['airline_id']]['airline_name'],
                             icao=airlines[row['airline_id']]['icao']) for row in snapshot['alliance_memberships']]
         validate_alliances(records, memberships, airlines, packed=True)
-        raw = json.dumps(dict(schema=1, records=records, memberships=memberships),
+        payload = dict(schema=1, records=records, memberships=memberships)
+        if any('alliance_type' in record for record in records):
+            payload['typed_memberships'] = memberships
+            # Earlier alliance readers choose the first record by airline ID alone.
+            # Keep typed packages installable without an incorrect badge on those builds.
+            payload['memberships'] = []
+        raw = json.dumps(payload,
                          ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
         if len(raw) > ALLIANCE_FILE_LIMIT:
             raise ValueError('Alliance catalog exceeds device budget')
@@ -600,10 +616,14 @@ def validate_package(manifest, read):
         if len(raw)!=meta['bytes'] or sha(raw)!=meta['sha256']:
             raise ValueError('Alliance catalog checksum mismatch')
         payload = json.loads(raw)
-        exact(payload, ('schema','records','memberships'))
+        exact(payload, ('schema','records','memberships') + (('typed_memberships',) if 'typed_memberships' in payload else ()))
         if payload['schema'] != 1:
             raise ValueError('Invalid alliance catalog schema')
         validate_alliances(payload['records'],payload['memberships'],{a['id']:a for a in rows['airlines']},packed=True)
+        if 'typed_memberships' in payload:
+            if payload['memberships']:
+                raise ValueError('Typed alliances must not be exposed to legacy readers')
+            validate_alliances(payload['records'],payload['typed_memberships'],{a['id']:a for a in rows['airlines']},packed=True)
     elif alliance_chunks:
         raise ValueError('Missing alliance catalog metadata')
     return required
