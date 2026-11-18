@@ -58,16 +58,16 @@ class CachedOriginals:
             guard=self.locks.setdefault(checksum,threading.Lock())
         with guard:
             cached=self.root/(checksum+'.png')
-            if cached.is_file() and cached.stat().st_size==max_bytes and digest(cached)==checksum:
+            if cached.is_file() and 0<cached.stat().st_size<=max_bytes and digest(cached)==checksum:
                 shutil.copyfile(cached,target)
                 # Bind copied bytes too, including changes during the copy.
-                if target.stat().st_size!=max_bytes or digest(target)!=checksum:
+                if not 0<target.stat().st_size<=max_bytes or digest(target)!=checksum:
                     raise ValueError('Cache changed during copy')
                 with self.lock:self.hits+=1
                 return
             self.store.get(key,target,checksum,max_bytes)
-            if target.stat().st_size!=max_bytes or digest(target)!=checksum:
-                raise ValueError('Invalid original for cache')
+            if not 0<target.stat().st_size<=max_bytes or digest(target)!=checksum:
+                raise ValueError('Invalid original for cache: '+key)
             temporary=cached.with_suffix('.tmp')
             shutil.copyfile(target,temporary);temporary.replace(cached)
             with self.lock:self.misses+=1
