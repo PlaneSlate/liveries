@@ -29,6 +29,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from time import perf_counter
 import threading
+import time
+import uuid
 
 REPO='PlaneSlate/liveries'
 HEX=re.compile(r'[a-f0-9]{64}')
@@ -92,6 +94,10 @@ def valid_name(name):
     return isinstance(name,str) and 1<len(name)<=180 and name==name.strip() and name.endswith('.png') and '_' in name and not re.search(r'[\x00-\x1f\x7f/\\:<>"|?*]',name) and '..' not in name
 
 
+class TransientStorageError(OSError):
+    pass
+
+
 class R2:
     def __init__(self):
         endpoint=urllib.parse.urlsplit(os.environ['R2_ENDPOINT'])
@@ -104,6 +110,22 @@ class R2:
         self.connections=threading.local()
 
     def get(self,key,target,checksum,max_bytes):
+        target=Path(target)
+        if target.exists():raise FileExistsError(target)
+        temporary=target.with_name(target.name+'.'+uuid.uuid4().hex+'.part')
+        for attempt in range(4):
+            try:
+                self._get_once(key,temporary,checksum,max_bytes)
+                temporary.replace(target)
+                return
+            except (OSError,http.client.HTTPException):
+                if attempt==3:raise
+                print('Temporary storage connection failure; retry %d/3'%(attempt+1),flush=True)
+                time.sleep(2**attempt)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def _get_once(self,key,target,checksum,max_bytes):
         if not HEX.fullmatch(checksum) or not re.fullmatch(r'[a-zA-Z0-9_./-]+',key) or '..' in key or key.startswith('/'):
             raise ValueError('Invalid object reference')
         now=datetime.now(timezone.utc)
@@ -127,6 +149,8 @@ class R2:
         try:
             c.request('GET',path,headers={'Authorization':auth,'x-amz-date':stamp,'x-amz-content-sha256':empty})
             r=c.getresponse()
+            if r.status in (408,429,500,502,503,504):
+                raise TransientStorageError('Original storage returned HTTP '+str(r.status))
             if r.status!=200:
                 raise ValueError('Original storage returned HTTP '+str(r.status))
             total=0
