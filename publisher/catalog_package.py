@@ -296,11 +296,11 @@ def validate(snapshot):
                     raise ValueError('Invalid aircraft type')
             elif table == 'airlines':
                 exact(row, ('id', 'icao', 'iata', 'airline_name', 'registered_in') + (('icao_ambiguous',) if 'icao_ambiguous' in row else ()) +
-                      tuple(f for f in ('military', 'corporate', 'special_text', *AIRLINE_DETAILS) if f in row))
+                      tuple(f for f in ('military', 'corporate', 'special_text', 'registration_assignment_required', *AIRLINE_DETAILS) if f in row))
                 validate_airline_details(row)
                 if 'icao_ambiguous' in row and type(row['icao_ambiguous']) is not bool:
                     raise ValueError('Invalid airline ambiguity marker')
-                for category in ('military', 'corporate'):
+                for category in ('military', 'corporate', 'registration_assignment_required'):
                     if category in row and type(row[category]) is not bool:
                         raise ValueError(f'Invalid {category} airline classification')
                 if 'special_text' in row:
@@ -326,7 +326,9 @@ def validate(snapshot):
                 for value in row['ids']:
                     airline_id(value)
             else:
-                exact(row, ('key', 'registration', 'type', 'airline', 'operator', 'livery', 'special') + role_field)
+                exact(row, ('key', 'registration', 'type', 'airline', 'operator', 'livery', 'special') + role_field + (('assignment_confirmed',) if 'assignment_confirmed' in row else ()))
+                if 'assignment_confirmed' in row and type(row['assignment_confirmed']) is not bool:
+                    raise ValueError('Invalid registration assignment confirmation')
                 key = text(row['key'], 16)
                 registration = text(row['registration'], 20)
                 if (not re.fullmatch(r'(?:[A-Z0-9]{2,16}|[0-9]{2}\+[0-9]{2})', key)
